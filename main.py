@@ -42,7 +42,7 @@ async def handle_message(message: Message):
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
 
-    if len(message.text or "") < 100:
+    if len(message.text or "") < 50:
         return
 
     if message.from_user.id == UNIQUE_USER_ID:
