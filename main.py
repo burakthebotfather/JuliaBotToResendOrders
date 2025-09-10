@@ -13,14 +13,20 @@ ALLOWED_THREADS = {
     -1002387655137: 9,
     -1002423500927: 4,
     -1002178818697: 4,
+    -1002477650634: 4,
+    -1002660511483: 4,
+    -1002864795738: 4, 
 }
 
 # chat_id -> readable name
 CHAT_NAMES = {
-    -1002079167705: "A. Mousse Art Bakery (Белинского, 23)",
-    -1002387655137: "B. Millionroz.by (Тимирязева, 67)",
-    -1002423500927: "E. Flovi.Studio (Тимирязева, 65Б)",
-    -1002178818697: "H. Kudesnica.by (Старовиленский тракт, 10)"
+    -1002079167705: "A. Mousse Art Bakery, Белинского, 23",
+    -1002387655137: "B. Millionroz.by, Тимирязева, 67",
+    -1002423500927: "E. Flovi.Studio, Тимирязева, 65Б",
+    -1002178818697: "H. Kudesnica.by, Старовиленский тракт, 10"
+    -1002477650634: "I. Cvetok.by, Восточная, 41"
+    -1002660511483: "K. Pastel Flowers, Сурганова, 31"
+    -1002864795738: "G. Цветы Мира, Академическая, 6"
 }
 
 bot = Bot(token=API_TOKEN)
@@ -49,9 +55,6 @@ async def handle_message(message: Message):
         return
 
     request_number = get_request_number()
-
-    # Ответ в чат
-    await message.reply(f"Заявка {request_number} зафиксирована.")
 
     # Получаем название чата
     chat_name = CHAT_NAMES.get(message.chat.id, f"Chat {message.chat.id}")
