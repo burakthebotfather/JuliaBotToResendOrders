@@ -1,4 +1,5 @@
 import asyncio
+import re
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from datetime import datetime
@@ -15,25 +16,26 @@ ALLOWED_THREADS = {
     -1002178818697: 4,
     -1002477650634: 4,
     -1002660511483: 4,
-    -1002864795738: 4, 
+    -1002864795738: 4,
 }
 
 # chat_id -> readable name
 CHAT_NAMES = {
-    -1002079167705: "A. Mousse Art Bakery, Белинского, 23",
-    -1002387655137: "B. Millionroz.by, Тимирязева, 67",
-    -1002423500927: "E. Flovi.Studio, Тимирязева, 65Б",
-    -1002178818697: "H. Kudesnica.by, Старовиленский тракт, 10",
-    -1002477650634: "I. Cvetok.by, Восточная, 41",
-    -1002660511483: "K. Pastel Flowers, Сурганова, 31",
-    -1002864795738: "G. Цветы Мира, Академическая, 6",
+    -1002079167705: "A. Mousse Art Bakery - Белинского, 23",
+    -1002387655137: "B. Millionroz.by - Тимирязева, 67",
+    -1002423500927: "E. Flovi.Studio - Тимирязева, 65Б",
+    -1002178818697: "H. Kudesnica.by - Старовиленский тракт, 10",
+    -1002477650634: "I. Cvetok.by - Восточная, 41",
+    -1002660511483: "K. Pastel Flowers - Сурганова, 31",
+    -1002864795738: "G. Цветы Мира - Академическая, 6",
 }
 
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
 # Счётчик заявок по дате
 message_counter = {"date": None, "count": 0}
+
 
 def get_request_number():
     today = datetime.now().strftime("%d.%m.%Y")
@@ -42,6 +44,58 @@ def get_request_number():
         message_counter["count"] = 0
     message_counter["count"] += 1
     return f"{message_counter['count']:02d} / {today}"
+
+
+def validate_contact(text: str) -> str:
+    """Проверка корректности контакта. Возвращает статус: ok, missing, invalid"""
+    cleaned = text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+
+    belarus_pattern = re.compile(r"(\+375\d{9}|80(25|29|33|44)\d{7})")
+    if belarus_pattern.search(cleaned):
+        return "ok"
+
+    if "@" in text:
+        return "ok"
+
+    if re.search(r"\+?\d{7,}", cleaned):  # есть номер, но не белорусский
+        return "invalid"
+
+    return "missing"
+
+
+def parse_order(text: str) -> str:
+    """Парсим заявку и возвращаем форматированный текст"""
+
+    patterns = {
+        "interval": r"(\d{1,2}[:.]\d{2}\s*-\s*\d{1,2}[:.]\d{2})",
+        "address": r"(Доставка[:\-]?\s*.+)",
+        "recipient": r"(Получатель[:\-]?\s*.+)",
+        "payment": r"(Оплачено[:\-]?\s*.+|Оплата[:\-]?\s*.+)",
+        "product": r"(Товар[:\-]?\s*.+|Букет[:\-]?\s*.+)",
+    }
+
+    fields = {"interval": "", "address": "", "recipient": "", "payment": "", "product": ""}
+
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            fields[key] = match.group(1).strip()
+
+    # Собираем финальный текст
+    result_lines = []
+    if fields["interval"]:
+        result_lines.append(fields["interval"])
+    if fields["address"]:
+        result_lines.append(fields["address"])
+    if fields["recipient"]:
+        result_lines.append(fields["recipient"])
+    if fields["payment"]:
+        result_lines.append(fields["payment"])
+    if fields["product"]:
+        result_lines.append(fields["product"])
+
+    return "\n".join(result_lines) if result_lines else text
+
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
@@ -55,18 +109,61 @@ async def handle_message(message: Message):
         return
 
     request_number = get_request_number()
-
-    # Получаем название чата
     chat_name = CHAT_NAMES.get(message.chat.id, f"Chat {message.chat.id}")
 
-    # Пересылаем в личку с названием чата
+    # Проверка контакта
+    status = validate_contact(message.text)
+
+    if status == "ok":
+        reply_text = "Заказ принят в работу."
+    elif status == "missing":
+        reply_text = (
+            "Номер для связи с получателем не обнаружен. "
+            "Доставка возможна без предварительного звонка получателю. "
+            "Риски - на отправителе."
+        )
+    else:  # invalid
+        reply_text = (
+            "Заказ не принят в работу. "
+            "Номер телефона получателя в заявке указан некорректно. "
+            "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ "
+            "или ник Telegram, используя символ @"
+        )
+
+    # Ответ в чат
+    await message.reply(reply_text)
+
+    # Формируем карточку
+    header = f"{request_number}\n{chat_name}\n\n"
+    parsed_body = parse_order(message.text)
+    forward_text = header + parsed_body
+
+    if status == "invalid":
+        forward_text = "❌ ОТКЛОНЕН ❌\n\n" + forward_text
+
+    # Отправляем админу
+    await bot.send_message(UNIQUE_USER_ID, forward_text)
+
+
+@dp.message(F.from_user.id == UNIQUE_USER_ID, F.forward_from)
+async def handle_forward(message: Message):
+    """Фиксируем пересылку администратором"""
+    target_user = message.forward_from
+    if not target_user.username:
+        return
+    if not message.reply_to_message:
+        return
+
     await bot.send_message(
-        UNIQUE_USER_ID,
-        f"Заявка {request_number} ({chat_name}):\n{message.text}"
+        message.reply_to_message.chat.id,
+        f"Заказ передан в работу для @{target_user.username}",
+        reply_to_message_id=message.reply_to_message.message_id,
     )
+
 
 async def main():
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
