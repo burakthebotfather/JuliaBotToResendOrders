@@ -30,7 +30,12 @@ CHAT_NAMES = {
     -1002864795738: "G. Цветы Мира - Академическая, 6",
 }
 
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+from aiogram.client.default import DefaultBotProperties
+
+bot = Bot(
+    token=API_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 dp = Dispatcher()
 
 # Счётчик заявок по дате
