@@ -70,7 +70,7 @@ def validate_contact(text: str) -> str:
     if "@" in text:
         return "ok"
 
-    if re.search(r"\+?\d{7,}", cleaned):  # есть номер, но не белорусский/не в нужном формате
+    if re.search(r"\+?\d{7,}", cleaned):  # есть номер, но не белорусский
         return "invalid"
 
     return "missing"
@@ -78,15 +78,15 @@ def validate_contact(text: str) -> str:
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
-    # пропускаем если не в нужном треде
+    # Пропускаем если не в нужном треде
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
 
-    # минимальная длина, как раньше
+    # Минимальная длина
     if len(message.text or "") < 50:
         return
 
-    # игнорируем сообщения от самого администратора
+    # Игнорируем сообщения от администратора
     if message.from_user.id == UNIQUE_USER_ID:
         return
 
@@ -115,39 +115,41 @@ async def handle_message(message: Message):
     # Ответ в исходном чате
     await message.reply(reply_text)
 
-    # Формируем карточку (без парсинга) и прикрепляем кнопку "Передать"
+    # Формируем карточку
     header = f"{request_number}\n{chat_name}\n\n"
     forward_text = header + (message.text or "")
 
     if status == "invalid":
         forward_text = "❌ ОТКЛОНЕН ❌\n\n" + forward_text
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Передать", callback_data=f"assign:{message.chat.id}:{message.message_id}")]
-    ])
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Передать",
+                    callback_data=f"assign:{message.chat.id}:{message.message_id}",
+                )
+            ]
+        ]
+    )
 
-    # Отправляем админу и запоминаем id этого сообщения (чтобы потом по reply точно знать, к какой заявке оно относится)
+    # Отправляем админу
     sent = await bot.send_message(UNIQUE_USER_ID, forward_text, reply_markup=kb)
     assign_mapping[sent.message_id] = (message.chat.id, message.message_id)
 
 
 @dp.callback_query(F.data.startswith("assign:"))
 async def cb_assign(callback: CallbackQuery):
-    """
-    Обработчик нажатия кнопки "Передать".
-    Просто даём инструкцию — админ должен ответить на это сообщение ником @username.
-    """
-    # краткое уведомление (toast)
-    await callback.answer("Отправь ник пользователя (например @ivan) в ответ на это сообщение.")
-    # и дубль-инструкция в чате (чтобы не потерялась)
-    await callback.message.reply("Отправь ник пользователя (например @ivan) в ответ на это сообщение.")
+    """Админ нажал кнопку 'Передать'"""
+    await callback.answer("Отправь ник пользователя (@username) в ответ на это сообщение.")
+    await callback.message.reply("Отправь ник пользователя (@username) в ответ на это сообщение.")
 
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_assign_reply(message: Message):
     """
     Админ отвечает на сообщение бота в личке ником (например @ivan).
-    Тогда бот уведомляет исходный чат, что заказ передан.
+    Бот уведомляет исходный чат и пересылает заказ исполнителю.
     """
     reply_to = message.reply_to_message
     if not reply_to:
@@ -155,7 +157,6 @@ async def handle_assign_reply(message: Message):
 
     orig = assign_mapping.get(reply_to.message_id)
     if not orig:
-        # возможно админ ответил не на то сообщение — игнорируем
         return
 
     target = (message.text or "").strip()
@@ -165,14 +166,29 @@ async def handle_assign_reply(message: Message):
 
     orig_chat_id, orig_msg_id = orig
 
-    # отправляем уведомление в исходный чат в reply к исходному сообщению
     try:
-        await bot.send_message(orig_chat_id, f"Заказ передан в работу для {target}", reply_to_message_id=orig_msg_id)
-        await message.reply("Готово — уведомил чат.")
-    except Exception as e:
-        await message.reply(f"Ошибка при уведомлении чата: {e}")
+        # 1. Уведомляем в исходном чате
+        await bot.send_message(
+            orig_chat_id,
+            f"Заказ передан в работу для {target}",
+            reply_to_message_id=orig_msg_id,
+        )
 
-    # чистим mapping (чтобы не накапливать)
+        # 2. Получаем объект пользователя по нику
+        chat = await bot.get_chat(target)
+        user_id = chat.id
+
+        # 3. Пересылаем заказ исполнителю
+        await bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=orig_chat_id,
+            message_id=orig_msg_id,
+        )
+
+        await message.reply("Готово — уведомил чат и переслал заказ исполнителю.")
+    except Exception as e:
+        await message.reply(f"Ошибка: {e}")
+
     assign_mapping.pop(reply_to.message_id, None)
 
 
