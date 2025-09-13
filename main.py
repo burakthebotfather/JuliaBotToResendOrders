@@ -24,6 +24,7 @@ ALLOWED_THREADS = {
     -1002477650634: 4,
     -1002660511483: 4,
     -1002864795738: 4,
+    -1002360529455: 4,
 }
 
 # chat_id -> readable name
@@ -35,6 +36,7 @@ CHAT_NAMES = {
     -1002477650634: "I. Cvetok.by - Восточная, 41",
     -1002660511483: "K. Pastel Flowers - Сурганова, 31",
     -1002864795738: "G. Цветы Мира - Академическая, 6",
+    -1002360529455: "333. ТЕСТ БОТОВ - 1-й Нагатинский пр-д",
 }
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
