@@ -5,12 +5,7 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-)
+from aiogram.types import Message
 
 API_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TOKEN_HERE")
 UNIQUE_USER_ID = int(os.getenv("UNIQUE_USER_ID", 542345855))
@@ -42,7 +37,7 @@ CHAT_NAMES = {
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Счётчик заявок по дате
+# счётчик заявок по дате
 message_counter = {"date": None, "count": 0}
 
 # mapping: admin_message_id -> (orig_chat_id, orig_message_id)
@@ -59,43 +54,35 @@ def get_request_number():
 
 
 def validate_contact(text: str) -> str:
-    """Проверка корректности контакта. Возвращает статус: ok, missing, invalid"""
+    """Проверка корректности контакта"""
     if not text:
         return "missing"
 
     cleaned = text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-
     belarus_pattern = re.compile(r"(\+375\d{9}|80(25|29|33|44)\d{7})")
+
     if belarus_pattern.search(cleaned):
         return "ok"
-
     if "@" in text:
         return "ok"
-
-    if re.search(r"\+?\d{7,}", cleaned):  # есть номер, но не белорусский
+    if re.search(r"\+?\d{7,}", cleaned):
         return "invalid"
-
     return "missing"
 
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
-    # Пропускаем если не в нужном треде
+    """Обрабатываем заявки из чатов"""
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
-
-    # Минимальная длина
     if len(message.text or "") < 50:
         return
-
-    # Игнорируем сообщения от администратора
     if message.from_user.id == UNIQUE_USER_ID:
         return
 
     request_number = get_request_number()
     chat_name = CHAT_NAMES.get(message.chat.id, f"Chat {message.chat.id}")
 
-    # Проверка контакта
     status = validate_contact(message.text)
 
     if status == "ok":
@@ -106,7 +93,7 @@ async def handle_message(message: Message):
             "Доставка возможна без предварительного звонка получателю. "
             "Риски - на отправителе."
         )
-    else:  # invalid
+    else:
         reply_text = (
             "Заказ не принят в работу. "
             "Номер телефона получателя в заявке указан некорректно. "
@@ -114,45 +101,23 @@ async def handle_message(message: Message):
             "или ник Telegram, используя символ @"
         )
 
-    # Ответ в исходном чате
+    # ответ в исходном чате
     await message.reply(reply_text)
 
-    # Формируем карточку
+    # карточка для администратора
     header = f"{request_number}\n{chat_name}\n\n"
     forward_text = header + (message.text or "")
 
     if status == "invalid":
         forward_text = "❌ ОТКЛОНЕН ❌\n\n" + forward_text
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Передать",
-                    callback_data=f"assign:{message.chat.id}:{message.message_id}",
-                )
-            ]
-        ]
-    )
-
-    # Отправляем админу
-    sent = await bot.send_message(UNIQUE_USER_ID, forward_text, reply_markup=kb)
+    sent = await bot.send_message(UNIQUE_USER_ID, forward_text)
     assign_mapping[sent.message_id] = (message.chat.id, message.message_id)
-
-
-@dp.callback_query(F.data.startswith("assign:"))
-async def cb_assign(callback: CallbackQuery):
-    """Админ нажал кнопку 'Передать'"""
-    await callback.answer("Отправь ник пользователя (@username) в ответ на это сообщение.")
-    await callback.message.reply("Отправь ник пользователя (@username) в ответ на это сообщение.")
 
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_assign_reply(message: Message):
-    """
-    Админ отвечает на сообщение бота в личке ником (например @ivan).
-    Бот уведомляет исходный чат и пересылает заказ исполнителю.
-    """
+    """Админ отвечает на сообщение бота ником исполнителя"""
     reply_to = message.reply_to_message
     if not reply_to:
         return
@@ -162,34 +127,20 @@ async def handle_assign_reply(message: Message):
         return
 
     target = (message.text or "").strip()
-    if not target.startswith("@") or len(target) < 2 or " " in target:
+    if not target.startswith("@") or " " in target:
         await message.reply("Пожалуйста, укажи ник в формате @username (без пробелов).")
         return
 
     orig_chat_id, orig_msg_id = orig
-
     try:
-        # 1. Уведомляем в исходном чате
         await bot.send_message(
             orig_chat_id,
-            f"Заказ передан в работу для {target}",
+            f"Доставка для {target}",
             reply_to_message_id=orig_msg_id,
         )
-
-        # 2. Получаем объект пользователя по нику
-        chat = await bot.get_chat(target)
-        user_id = chat.id
-
-        # 3. Пересылаем заказ исполнителю
-        await bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=orig_chat_id,
-            message_id=orig_msg_id,
-        )
-
-        await message.reply("Готово — уведомил чат и переслал заказ исполнителю.")
+        await message.reply("Готово — уведомил чат.")
     except Exception as e:
-        await message.reply(f"Ошибка: {e}")
+        await message.reply(f"Ошибка при уведомлении чата: {e}")
 
     assign_mapping.pop(reply_to.message_id, None)
 
