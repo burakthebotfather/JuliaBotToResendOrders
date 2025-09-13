@@ -4,6 +4,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from datetime import datetime
 import os
+from aiogram.client.default import DefaultBotProperties
 
 API_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TOKEN_HERE")
 UNIQUE_USER_ID = int(os.getenv("UNIQUE_USER_ID", 542345855))
@@ -29,8 +30,6 @@ CHAT_NAMES = {
     -1002660511483: "K. Pastel Flowers - Сурганова, 31",
     -1002864795738: "G. Цветы Мира - Академическая, 6",
 }
-
-from aiogram.client.default import DefaultBotProperties
 
 bot = Bot(
     token=API_TOKEN,
@@ -68,40 +67,6 @@ def validate_contact(text: str) -> str:
     return "missing"
 
 
-def parse_order(text: str) -> str:
-    """Парсим заявку и возвращаем форматированный текст"""
-
-    patterns = {
-        "interval": r"(\d{1,2}[:.]\d{2}\s*-\s*\d{1,2}[:.]\d{2})",
-        "address": r"(Доставка[:\-]?\s*.+)",
-        "recipient": r"(Получатель[:\-]?\s*.+)",
-        "payment": r"(Оплачено[:\-]?\s*.+|Оплата[:\-]?\s*.+)",
-        "product": r"(Товар[:\-]?\s*.+|Букет[:\-]?\s*.+)",
-    }
-
-    fields = {"interval": "", "address": "", "recipient": "", "payment": "", "product": ""}
-
-    for key, pattern in patterns.items():
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            fields[key] = match.group(1).strip()
-
-    # Собираем финальный текст
-    result_lines = []
-    if fields["interval"]:
-        result_lines.append(fields["interval"])
-    if fields["address"]:
-        result_lines.append(fields["address"])
-    if fields["recipient"]:
-        result_lines.append(fields["recipient"])
-    if fields["payment"]:
-        result_lines.append(fields["payment"])
-    if fields["product"]:
-        result_lines.append(fields["product"])
-
-    return "\n".join(result_lines) if result_lines else text
-
-
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
@@ -123,7 +88,7 @@ async def handle_message(message: Message):
         reply_text = "Заказ принят в работу."
     elif status == "missing":
         reply_text = (
-            "Номер для связи с получателем не обнаружен. "
+            "Номер для связи не обнаружен. "
             "Доставка возможна без предварительного звонка получателю. "
             "Риски - на отправителе."
         )
@@ -138,10 +103,9 @@ async def handle_message(message: Message):
     # Ответ в чат
     await message.reply(reply_text)
 
-    # Формируем карточку
+    # Формируем карточку (без парсинга)
     header = f"{request_number}\n{chat_name}\n\n"
-    parsed_body = parse_order(message.text)
-    forward_text = header + parsed_body
+    forward_text = header + message.text
 
     if status == "invalid":
         forward_text = "❌ ОТКЛОНЕН ❌\n\n" + forward_text
