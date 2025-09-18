@@ -105,36 +105,28 @@ async def handle_message(message: Message):
     status = validate_contact(message.text or "")
     night = is_night_time()
 
-    # Автоответ только если ночь или некорректные данные
-    accept_reply_id = None
     if night:
-        reply_text = "Уже не онлайн 🌃\nНакапливаю заявки - распределим утром."
         try:
-            await message.reply(reply_text)
+            await message.reply("Уже не онлайн 🌃\nНакапливаю заявки - распределим утром.")
         except Exception:
             pass
     else:
-        if status == "ok":
-            # Ждём решения админа
-            pass
-        elif status == "missing":
-            reply_text = (
-                "Номер для связи не обнаружен. "
-                "Доставка возможна без предварительного звонка получателю. "
-                "Риски - на отправителе."
-            )
+        if status == "missing":
             try:
-                await message.reply(reply_text)
+                await message.reply(
+                    "Номер для связи не обнаружен. "
+                    "Доставка возможна без предварительного звонка получателю. "
+                    "Риски - на отправителе."
+                )
             except Exception:
                 pass
-        else:
-            reply_text = (
-                "Заказ не принят в работу. "
-                "Номер телефона получателя в заявке указан некорректно. "
-                "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram, используя символ @."
-            )
+        elif status == "invalid":
             try:
-                await message.reply(reply_text)
+                await message.reply(
+                    "Заказ не принят в работу. "
+                    "Номер телефона получателя в заявке указан некорректно. "
+                    "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram, используя символ @."
+                )
             except Exception:
                 pass
 
@@ -166,7 +158,7 @@ async def handle_message(message: Message):
     assign_mapping[sent.message_id] = {
         "orig_chat_id": message.chat.id,
         "orig_msg_id": message.message_id,
-        "accept_reply_id": None,  # сюда сохраним id "Заказ принят" для удаления
+        "accept_reply_id": None,
     }
 
 
@@ -184,20 +176,35 @@ async def handle_decision(callback: CallbackQuery):
     orig_msg_id = info["orig_msg_id"]
 
     if action == "accept":
-        reply_text = "Заказ принят в работу."
         try:
-            sent = await bot.send_message(orig_chat_id, reply_text, reply_to_message_id=orig_msg_id)
+            sent = await bot.send_message(orig_chat_id, "Заказ принят в работу.", reply_to_message_id=orig_msg_id)
             info["accept_reply_id"] = sent.message_id
         except Exception:
             pass
         popup = "Отметил как принятый."
+
+        # оставляем только кнопку "Выполнен"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
+        ])
+        await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+
     elif action == "reject":
-        reply_text = "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала."
         try:
-            await bot.send_message(orig_chat_id, reply_text, reply_to_message_id=orig_msg_id)
+            await bot.send_message(
+                orig_chat_id,
+                "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.",
+                reply_to_message_id=orig_msg_id,
+            )
         except Exception:
             pass
         popup = "Отметил как отклонённый."
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
+        ])
+        await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+
     else:  # done
         try:
             await bot.delete_message(chat_id=UNIQUE_USER_ID, message_id=admin_msg_id)
@@ -206,12 +213,6 @@ async def handle_decision(callback: CallbackQuery):
         assign_mapping.pop(admin_msg_id, None)
         await callback.answer("Карточка удалена.")
         return
-
-    # убираем кнопки у карточки
-    try:
-        await bot.edit_message_reply_markup(chat_id=UNIQUE_USER_ID, message_id=admin_msg_id, reply_markup=None)
-    except Exception:
-        pass
 
     assign_mapping[admin_msg_id] = info
     await callback.answer(popup)
@@ -258,17 +259,8 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply(f"Ошибка при уведомлении исходного чата: {e}")
         return
 
-    # Подтверждение админу
-    try:
-        confirm = await message.reply("Готово — уведомил чат.")
-    except Exception:
-        confirm = None
-
-    # Удалим @username + подтверждение через 5 минут
-    to_delete = [message.message_id]
-    if confirm:
-        to_delete.append(confirm.message_id)
-    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, to_delete, delay=5 * 60))
+    confirm = await message.reply("Готово — уведомил чат.")
+    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5 * 60))
 
     assign_mapping[admin_sent_msg_id] = info
 
