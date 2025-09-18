@@ -19,7 +19,7 @@ UNIQUE_USER_ID = int(os.getenv("UNIQUE_USER_ID", 542345855))
 # Часовой пояс (UTC+3)
 TZ = ZoneInfo("Europe/Minsk")
 
-# chat_id -> thread_id (сохранил все, как у тебя)
+# chat_id -> thread_id
 ALLOWED_THREADS = {
     -1002079167705: 7340,
     -1002387655137: 9,
@@ -32,7 +32,7 @@ ALLOWED_THREADS = {
     -1002538985387: 4,
 }
 
-# chat_id -> readable name (как у тебя)
+# chat_id -> readable name
 CHAT_NAMES = {
     -1002079167705: "A. Mousse Art Bakery - Белинского, 23",
     -1002387655137: "B. Millionroz.by - Тимирязева, 67",
@@ -48,8 +48,11 @@ CHAT_NAMES = {
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Счётчик заявок по дате (если нужен)
+# Счётчик заявок по дате
 message_counter = {"date": None, "count": 0}
+
+# admin_msg_id -> {orig_chat_id, orig_msg_id, accept_reply_id (если есть)}
+assign_mapping: dict[int, dict] = {}
 
 
 def get_request_number():
@@ -67,7 +70,6 @@ def is_night_time() -> bool:
 
 
 def validate_contact(text: str) -> str:
-    """Возвращает: 'ok', 'missing', 'invalid'"""
     if not text:
         return "missing"
     cleaned = text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -81,10 +83,6 @@ def validate_contact(text: str) -> str:
     return "missing"
 
 
-# mapping: admin_sent_message_id -> { orig_chat_id, orig_msg_id, (optionally other fields) }
-assign_mapping: dict[int, dict] = {}
-
-# Удаляет список сообщений в чате через delay секунд
 async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int = 300):
     await asyncio.sleep(delay)
     for m_id in message_ids:
@@ -96,36 +94,28 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
-    """Перехватываем заявки из разрешённых тредов."""
-    # фильтр треда
+    """Обработка заявок из чатов."""
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
-
-    # минимальная длина
     if len(message.text or "") < 50:
         return
-
-    # игнорируем сообщения от самого администратора
     if message.from_user.id == UNIQUE_USER_ID:
         return
 
     status = validate_contact(message.text or "")
     night = is_night_time()
 
-    # Если не ночь и статус == 'ok' — *не* отвечаем автоматически.
-    # Для остальных статусов (missing/invalid) или при ночном режиме — оставим ответ в чате,
-    # как было раньше (если нужно изменить — скажи).
+    # Автоответ только если ночь или некорректные данные
+    accept_reply_id = None
     if night:
-        # Сохраняем прежнее поведение — отвечаем ночным текстом в чате, затем пересылаем админу с пометкой.
         reply_text = "Уже не онлайн 🌃\nНакапливаю заявки - распределим утром."
         try:
             await message.reply(reply_text)
         except Exception:
             pass
     else:
-        # если статус != ok — отправляем соответствующий ответ в исходный чат
         if status == "ok":
-            # НЕ присылаем автоматический "Заказ принят в работу." — кнопки будут у админа
+            # Ждём решения админа
             pass
         elif status == "missing":
             reply_text = (
@@ -137,7 +127,7 @@ async def handle_message(message: Message):
                 await message.reply(reply_text)
             except Exception:
                 pass
-        else:  # invalid
+        else:
             reply_text = (
                 "Заказ не принят в работу. "
                 "Номер телефона получателя в заявке указан некорректно. "
@@ -148,7 +138,7 @@ async def handle_message(message: Message):
             except Exception:
                 pass
 
-    # Формируем карточку для администратора (с кнопками Принять/Отклонить)
+    # Карточка админу
     request_number = get_request_number()
     chat_name = CHAT_NAMES.get(message.chat.id, f"Chat {message.chat.id}")
     header = f"{request_number}\n{chat_name}\n\n"
@@ -160,9 +150,10 @@ async def handle_message(message: Message):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Принять заказ", callback_data="decision:accept"),
-            InlineKeyboardButton(text="❌ Отклонить заказ", callback_data="decision:reject"),
-        ]
+            InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
+        ],
+        [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
     ])
 
     sent = await bot.send_message(
@@ -172,62 +163,63 @@ async def handle_message(message: Message):
         disable_notification=night,
     )
 
-    # сохраняем связь admin_msg_id -> исходный чат+сообщение
     assign_mapping[sent.message_id] = {
         "orig_chat_id": message.chat.id,
         "orig_msg_id": message.message_id,
+        "accept_reply_id": None,  # сюда сохраним id "Заказ принят" для удаления
     }
 
 
 @dp.callback_query(F.data.startswith("decision:"))
 async def handle_decision(callback: CallbackQuery):
-    """Обработка нажатия 'Принять' / 'Отклонить' админом."""
-    # admin message id (это то сообщение, под которым была нажата кнопка)
+    """Принят/отклонён/выполнен."""
     admin_msg_id = callback.message.message_id
     info = assign_mapping.get(admin_msg_id)
     if not info:
         await callback.answer("Заявка устарела или не найдена.", show_alert=True)
         return
 
-    action = callback.data.split(":", 1)[1]  # "accept" или "reject"
+    action = callback.data.split(":", 1)[1]
     orig_chat_id = info["orig_chat_id"]
     orig_msg_id = info["orig_msg_id"]
 
     if action == "accept":
         reply_text = "Заказ принят в работу."
+        try:
+            sent = await bot.send_message(orig_chat_id, reply_text, reply_to_message_id=orig_msg_id)
+            info["accept_reply_id"] = sent.message_id
+        except Exception:
+            pass
         popup = "Отметил как принятый."
-    else:
+    elif action == "reject":
         reply_text = "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала."
+        try:
+            await bot.send_message(orig_chat_id, reply_text, reply_to_message_id=orig_msg_id)
+        except Exception:
+            pass
         popup = "Отметил как отклонённый."
-
-    # отправляем ответ в исходный чат (reply к исходному сообщению)
-    try:
-        await bot.send_message(
-            orig_chat_id,
-            reply_text,
-            reply_to_message_id=orig_msg_id,
-        )
-    except Exception as e:
-        await callback.answer(f"Ошибка при отправке в исходный чат: {e}", show_alert=True)
+    else:  # done
+        try:
+            await bot.delete_message(chat_id=UNIQUE_USER_ID, message_id=admin_msg_id)
+        except Exception:
+            pass
+        assign_mapping.pop(admin_msg_id, None)
+        await callback.answer("Карточка удалена.")
         return
 
-    # убираем кнопки под карточкой у админа (чтобы нельзя было нажать снова)
+    # убираем кнопки у карточки
     try:
         await bot.edit_message_reply_markup(chat_id=UNIQUE_USER_ID, message_id=admin_msg_id, reply_markup=None)
     except Exception:
         pass
 
+    assign_mapping[admin_msg_id] = info
     await callback.answer(popup)
 
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
-    """
-    Админ отвечает на карточку в ЛС, указывая @username.
-    Бот отправляет в исходный чат 'Доставка для @username' (reply к заявке).
-    Сообщение админа с @username и подтверждение бота будут удалены через 5 минут,
-    чтобы в ЛС остались только пересланные карточки.
-    """
+    """Назначение водителя через @username."""
     reply_to = message.reply_to_message
     if not reply_to:
         return
@@ -240,13 +232,22 @@ async def handle_admin_assign_reply(message: Message):
 
     target = (message.text or "").strip()
     if not target.startswith("@") or " " in target:
-        await message.reply("Пожалуйста, укажи ник в формате @username (без пробелов).")
+        await message.reply("Укажи ник в формате @username.")
         return
 
     orig_chat_id = info["orig_chat_id"]
     orig_msg_id = info["orig_msg_id"]
 
-    # Отправляем пометку в исходный чат (reply к заявке)
+    # Удаляем "Заказ принят..." если был
+    accept_reply_id = info.get("accept_reply_id")
+    if accept_reply_id:
+        try:
+            await bot.delete_message(chat_id=orig_chat_id, message_id=accept_reply_id)
+        except Exception:
+            pass
+        info["accept_reply_id"] = None
+
+    # Отправляем "Доставка для ..."
     try:
         await bot.send_message(
             orig_chat_id,
@@ -257,20 +258,19 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply(f"Ошибка при уведомлении исходного чата: {e}")
         return
 
-    # Отправляем подтверждение админу и запланируем удаление:
+    # Подтверждение админу
     try:
         confirm = await message.reply("Готово — уведомил чат.")
     except Exception:
         confirm = None
 
-    # Планируем удаление: сам admin message (с @username) и подтверждения (если есть)
+    # Удалим @username + подтверждение через 5 минут
     to_delete = [message.message_id]
     if confirm:
         to_delete.append(confirm.message_id)
-
     asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, to_delete, delay=5 * 60))
 
-    # (Оставляем карточку админа в ЛС — она не удаляется, чтобы админ видел историю заявок)
+    assign_mapping[admin_sent_msg_id] = info
 
 
 async def main():
