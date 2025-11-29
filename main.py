@@ -19,7 +19,69 @@ UNIQUE_USER_ID = int(os.getenv("UNIQUE_USER_ID", 542345855))
 # Часовой пояс (UTC+3)
 TZ = ZoneInfo("Europe/Minsk")
 
-# chat_id -> thread_id
+# --- !!! Новый блок: Триггеры водителей --------------------------------------
+
+TRIGGERS = {
+    "габ": "Габаритный заказ",
+    "габ.": "Габаритный заказ",
+    "трудн": "Трудный вход",
+    "трудн.": "Трудный вход",
+    "этаж": "Этаж",
+    "коробка": "Тяжёлая коробка",
+    "тяжелая": "Тяжёлая коробка",
+}
+
+def is_driver_message(text: str) -> bool:
+    """
+    Определяем, что это сообщение водителя (отчёт).
+    Сообщение должно содержать адрес + знак '+' + триггеры.
+    В то же время не должно быть похоже на заявку магазина.
+    """
+    if not text or "+" not in text:
+        return False
+
+    # если оно слишком длинное и похоже на заявку — пропускаем
+    request_markers = [
+        "адрес:", "интервал", "получатель", "оплата",
+        "заявка", "заказ", "способ"
+    ]
+    tlow = text.lower()
+
+    if any(marker in tlow for marker in request_markers):
+        return False
+
+    # До плюса должен быть адрес
+    before = text.split("+")[0].strip()
+    if len(before) < 5:
+        return False
+
+    return True
+
+
+def parse_driver_message(text: str):
+    """Извлекает адрес и триггеры водителя."""
+    if "+" not in text:
+        return None
+
+    address, triggers_raw = text.split("+", 1)
+    address = address.strip()
+    triggers_raw = triggers_raw.lower().strip()
+
+    found = []
+    for key, val in TRIGGERS.items():
+        if key in triggers_raw:
+            found.append(val)
+
+    return {
+        "address": address,
+        "triggers": found
+    }
+
+
+# --- Конец блока триггеров водителей ------------------------------------------
+
+
+# chat_id -> thread_id (заявки магазинов)
 ALLOWED_THREADS = {
     -1002079167705: 7340,
     -1002936236597: 4,
@@ -96,6 +158,54 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
             pass
 
 
+# -------------------------------------------------------------------------------
+#          🔥 Новый обработчик ДО обработчика заявок магазинов
+# -------------------------------------------------------------------------------
+
+@dp.message()
+async def handle_driver_messages(message: Message):
+    """
+    Этот обработчик ловит ВСЕ сообщения и первым проверяет —
+    является ли оно отчётом водителя.
+    Если да — обрабатывает и прекращает цепочку.
+    """
+
+    text = message.text or ""
+
+    if not is_driver_message(text):
+        return    # → не водитель → идём дальше (в твой основной handler)
+
+    parsed = parse_driver_message(text)
+
+    if not parsed:
+        return
+
+    # Ответ водителю
+    reply = (
+        f"📝 Отчёт принят!\n"
+        f"📍 Адрес: {parsed['address']}"
+    )
+
+    if parsed["triggers"]:
+        reply += "\n🔧 Триггеры:\n" + "\n".join(f"• {t}" for t in parsed["triggers"])
+    else:
+        reply += "\n(Триггеры отсутствуют)"
+
+    await message.reply(reply)
+
+    # Здесь можно вставить:
+    # → запись в Google Sheets
+    # → начисления водителю
+    # → anything you want
+
+    # ВАЖНО: прекращаем дальнейшую обработку
+    raise asyncio.CancelledError()
+
+
+# -------------------------------------------------------------------------------
+#          Ниже — ТВОЙ исходный код обработки заявок магазинов
+# -------------------------------------------------------------------------------
+
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
     """Обработка заявок из чатов."""
@@ -134,7 +244,6 @@ async def handle_message(message: Message):
             except Exception:
                 pass
 
-    # Карточка админу
     request_number = get_request_number()
     chat_name = CHAT_NAMES.get(message.chat.id, f"Chat {message.chat.id}")
     header = f"{request_number}\n{chat_name}\n\n"
@@ -168,7 +277,6 @@ async def handle_message(message: Message):
 
 @dp.callback_query(F.data.startswith("decision:"))
 async def handle_decision(callback: CallbackQuery):
-    """Принят/отклонён/выполнен."""
     admin_msg_id = callback.message.message_id
     info = assign_mapping.get(admin_msg_id)
     if not info:
@@ -187,7 +295,6 @@ async def handle_decision(callback: CallbackQuery):
             pass
         popup = "Отметил как принятый."
 
-        # оставляем только кнопку "Выполнен"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
         ])
@@ -224,7 +331,6 @@ async def handle_decision(callback: CallbackQuery):
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
-    """Назначение водителя через @username."""
     reply_to = message.reply_to_message
     if not reply_to:
         return
@@ -243,7 +349,6 @@ async def handle_admin_assign_reply(message: Message):
     orig_chat_id = info["orig_chat_id"]
     orig_msg_id = info["orig_msg_id"]
 
-    # Удаляем "Заказ принят..." если был
     accept_reply_id = info.get("accept_reply_id")
     if accept_reply_id:
         try:
@@ -252,7 +357,6 @@ async def handle_admin_assign_reply(message: Message):
             pass
         info["accept_reply_id"] = None
 
-    # Отправляем "Доставка для ..."
     try:
         await bot.send_message(
             orig_chat_id,
@@ -271,6 +375,10 @@ async def handle_admin_assign_reply(message: Message):
 
 async def main():
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 
 if __name__ == "__main__":
