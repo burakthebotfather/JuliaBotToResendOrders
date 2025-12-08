@@ -1,4 +1,3 @@
-# main.py
 import asyncio
 import re
 import os
@@ -56,7 +55,7 @@ dp = Dispatcher()
 # Счётчик заявок по дате
 message_counter = {"date": None, "count": 0}
 
-# admin_msg_id -> {orig_chat_id, orig_msg_id, accept_reply_id, last_assigned_driver}
+# admin_msg_id -> {orig_chat_id, orig_msg_id, accept_reply_id (если есть)}
 assign_mapping: dict[int, dict] = {}
 
 
@@ -95,23 +94,6 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
             await bot.delete_message(chat_id=chat_id, message_id=m_id)
         except Exception:
             pass
-
-
-def admin_keyboard():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
-        ],
-        [
-            InlineKeyboardButton(
-                text="ℹ️ Рекомендации по адресу",
-                callback_data="info:address"
-            )
-        ],
-        [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
-    ])
-    return kb
 
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
@@ -162,10 +144,18 @@ async def handle_message(message: Message):
     if night:
         forward_body = "НОЧНОЙ ЗАКАЗ 🌙\n\n" + forward_body
 
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
+        ],
+        [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
+    ])
+
     sent = await bot.send_message(
         UNIQUE_USER_ID,
         forward_body,
-        reply_markup=admin_keyboard(),
+        reply_markup=kb,
         disable_notification=night,
     )
 
@@ -173,12 +163,12 @@ async def handle_message(message: Message):
         "orig_chat_id": message.chat.id,
         "orig_msg_id": message.message_id,
         "accept_reply_id": None,
-        "last_assigned_driver": None
     }
 
 
 @dp.callback_query(F.data.startswith("decision:"))
 async def handle_decision(callback: CallbackQuery):
+    """Принят/отклонён/выполнен."""
     admin_msg_id = callback.message.message_id
     info = assign_mapping.get(admin_msg_id)
     if not info:
@@ -191,17 +181,13 @@ async def handle_decision(callback: CallbackQuery):
 
     if action == "accept":
         try:
-            sent = await bot.send_message(
-                orig_chat_id,
-                "Заказ принят в работу. 💡 Рекомендуется уточнять все обязательные элементы адреса при формировании исходной заявки.\n"
-                "🏠 для жилых помещений: адрес, подъезд, этаж, номер квартиры и (или) комментарий;\n"
-                "🏢 для коммерческих зданий: адрес, номер офиса, блок, секция, ориентиры входа, режим доступа и иные сведения, обеспечивающие возможность осуществления доставки",
-                reply_to_message_id=orig_msg_id
-            )
+            sent = await bot.send_message(orig_chat_id, "Заказ принят в работу.", reply_to_message_id=orig_msg_id)
             info["accept_reply_id"] = sent.message_id
         except Exception:
             pass
         popup = "Отметил как принятый."
+
+        # оставляем только кнопку "Выполнен"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
         ])
@@ -217,6 +203,7 @@ async def handle_decision(callback: CallbackQuery):
         except Exception:
             pass
         popup = "Отметил как отклонённый."
+
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
         ])
@@ -237,50 +224,49 @@ async def handle_decision(callback: CallbackQuery):
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
-    """Назначение водителя — вариант 3: уведомление магазина без отправки карточки водителю."""
+    """Назначение водителя через @username."""
     reply_to = message.reply_to_message
     if not reply_to:
         return
 
-    admin_msg_id = reply_to.message_id
-    info = assign_mapping.get(admin_msg_id)
+    admin_sent_msg_id = reply_to.message_id
+    info = assign_mapping.get(admin_sent_msg_id)
     if not info:
         await message.reply("Информация по этой заявке устарела или не найдена.")
         return
 
-    raw = (message.text or "").strip()
-    if not raw:
-        await message.reply("Пожалуйста, укажи ник в формате @username.")
-        return
-
-    # извлекаем @username
-    m = re.search(r"@([A-Za-z0-9_]{5,32})", raw)
-    if not m:
+    target = (message.text or "").strip()
+    if not target.startswith("@") or " " in target:
         await message.reply("Укажи ник в формате @username.")
         return
-    username = m.group(1)
-    target = f"@{username}"
 
     orig_chat_id = info["orig_chat_id"]
     orig_msg_id = info["orig_msg_id"]
 
-    # проверка повторного назначения
-    if info.get("last_assigned_driver") is not None:
+    # Удаляем "Заказ принят..." если был
+    accept_reply_id = info.get("accept_reply_id")
+    if accept_reply_id:
         try:
-            await bot.send_message(
-                orig_chat_id,
-                f"Назначен новый водитель. Доставка для {target}",
-                reply_to_message_id=orig_msg_id
-            )
+            await bot.delete_message(chat_id=orig_chat_id, message_id=accept_reply_id)
         except Exception:
             pass
+        info["accept_reply_id"] = None
 
-    # обновляем последний назначенный ник
-    info["last_assigned_driver"] = target
-    assign_mapping[admin_msg_id] = info
+    # Отправляем "Доставка для ..."
+    try:
+        await bot.send_message(
+            orig_chat_id,
+            f"Доставка для {target}",
+            reply_to_message_id=orig_msg_id,
+        )
+    except Exception as e:
+        await message.reply(f"Ошибка при уведомлении исходного чата: {e}")
+        return
 
-    confirm = await message.reply(f"Готово — назначен водитель {target}.")
-    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5*60))
+    confirm = await message.reply("Готово — уведомил чат.")
+    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5 * 60))
+
+    assign_mapping[admin_sent_msg_id] = info
 
 
 async def main():
