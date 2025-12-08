@@ -1,3 +1,4 @@
+# main.py
 import asyncio
 import re
 import os
@@ -55,7 +56,18 @@ dp = Dispatcher()
 # Счётчик заявок по дате
 message_counter = {"date": None, "count": 0}
 
-# admin_msg_id -> {orig_chat_id, orig_msg_id, accept_reply_id (если есть)}
+# admin_msg_id -> dict с данными
+# структура:
+# {
+#   "orig_chat_id": int,
+#   "orig_msg_id": int,
+#   "accept_reply_id": int|None,
+#   "request_number": str,
+#   "admin_text": str,
+#   "driver_id": int|None,
+#   "driver_msg_id": int|None,
+#   "driver_state": str|None
+# }
 assign_mapping: dict[int, dict] = {}
 
 
@@ -96,11 +108,48 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
             pass
 
 
+# --- клавиатуры ---
+def admin_keyboard():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
+        ],
+        [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
+    ])
+    return kb
+
+
+def driver_keyboard(admin_msg_id: int, state: str | None = None) -> InlineKeyboardMarkup:
+    """
+    Кнопки для водителя (локально, вариант A).
+    callback_data формата: drv:<action>:<admin_msg_id>
+    """
+    def label(base):
+        if state and base == state:
+            return f"{base} ✅"
+        return base
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label("Принять"), callback_data=f"drv:accept:{admin_msg_id}")],
+        [InlineKeyboardButton(text=label("В пути за заказом"), callback_data=f"drv:onway:{admin_msg_id}")],
+        [InlineKeyboardButton(text=label("Заказ получен"), callback_data=f"drv:got:{admin_msg_id}")],
+        [InlineKeyboardButton(text=label("Выполнен"), callback_data=f"drv:done:{admin_msg_id}")],
+    ])
+    return kb
+
+
+# --------------------------
+# Обработка входящих сообщений из чатов
+# --------------------------
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
     """Обработка заявок из чатов."""
-    if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
+    # проверяем thread_id
+    expected_thread = ALLOWED_THREADS.get(message.chat.id)
+    if getattr(message, "message_thread_id", None) != expected_thread:
         return
+
     if len(message.text or "") < 50:
         return
     if message.from_user.id == UNIQUE_USER_ID:
@@ -144,13 +193,7 @@ async def handle_message(message: Message):
     if night:
         forward_body = "НОЧНОЙ ЗАКАЗ 🌙\n\n" + forward_body
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
-        ],
-        [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
-    ])
+    kb = admin_keyboard()
 
     sent = await bot.send_message(
         UNIQUE_USER_ID,
@@ -159,13 +202,22 @@ async def handle_message(message: Message):
         disable_notification=night,
     )
 
+    # сохраняем в mapping; ключ = message_id в чате админа
     assign_mapping[sent.message_id] = {
         "orig_chat_id": message.chat.id,
         "orig_msg_id": message.message_id,
         "accept_reply_id": None,
+        "request_number": request_number,
+        "admin_text": forward_body,  # полезно для отправки водителю
+        "driver_id": None,
+        "driver_msg_id": None,
+        "driver_state": None,
     }
 
 
+# --------------------------
+# Обработчики кнопок - админ
+# --------------------------
 @dp.callback_query(F.data.startswith("decision:"))
 async def handle_decision(callback: CallbackQuery):
     """Принят/отклонён/выполнен."""
@@ -191,7 +243,10 @@ async def handle_decision(callback: CallbackQuery):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
         ])
-        await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+        try:
+            await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+        except Exception:
+            pass
 
     elif action == "reject":
         try:
@@ -207,7 +262,10 @@ async def handle_decision(callback: CallbackQuery):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
         ])
-        await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+        try:
+            await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+        except Exception:
+            pass
 
     else:  # done
         try:
@@ -222,6 +280,9 @@ async def handle_decision(callback: CallbackQuery):
     await callback.answer(popup)
 
 
+# --------------------------
+# Назначение водителя через reply админа на карточку
+# --------------------------
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
     """Назначение водителя через @username."""
@@ -236,6 +297,7 @@ async def handle_admin_assign_reply(message: Message):
         return
 
     target = (message.text or "").strip()
+    # ожидаем ровно один ник в формате @username
     if not target.startswith("@") or " " in target:
         await message.reply("Укажи ник в формате @username.")
         return
@@ -263,12 +325,107 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply(f"Ошибка при уведомлении исходного чата: {e}")
         return
 
-    confirm = await message.reply("Готово — уведомил чат.")
-    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5 * 60))
+    # --- НОВОЕ: отправляем дубликат карточки водителю в личку (вариант A) ---
+    username = target.lstrip("@")
+    try:
+        # получаем chat объекта водителя; если ник неверный - исключение
+        chat_obj = await bot.get_chat(f"@{username}")
+        driver_id = chat_obj.id
+    except Exception:
+        await message.reply(f"Не удалось найти пользователя {target}. Проверь ник и попробуй снова.")
+        return
 
+    # Формируем текст карточки для водителя (идентичен карточке админу)
+    admin_text = info.get("admin_text", "")
+    driver_text = admin_text
+
+    try:
+        sent_to_driver = await bot.send_message(
+            chat_id=driver_id,
+            text=driver_text,
+            reply_markup=driver_keyboard(admin_sent_msg_id, state=None),
+        )
+    except Exception:
+        await message.reply(f"Не удалось отправить карточку {target}. Возможно, у пользователя закрыты личные сообщения.")
+        return
+
+    # Обновляем mapping
+    info["driver_id"] = driver_id
+    info["driver_msg_id"] = sent_to_driver.message_id
+    info["driver_state"] = None
     assign_mapping[admin_sent_msg_id] = info
 
+    # Подтверждаем админу и удаляем служебные сообщения через время
+    confirm = await message.reply("Готово — уведомил чат и отправил карточку водителю в личку.")
+    # удалим сообщения админа (его сообщение с ником и подтверждение) через 5 минут
+    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5 * 60))
 
+
+# --------------------------
+# Обработчики callback'ов — водитель (локально, вариант A)
+# --------------------------
+@dp.callback_query(F.data.startswith("drv:"))
+async def handle_driver_callbacks(callback: CallbackQuery):
+    """
+    Формат callback.data: drv:<action>:<admin_msg_id>
+    Действия: accept, onway, got, done
+    """
+    parts = callback.data.split(":", 2)
+    if len(parts) != 3:
+        await callback.answer("Неверные данные", show_alert=True)
+        return
+    _, action, admin_msg_id_str = parts
+    try:
+        admin_msg_id = int(admin_msg_id_str)
+    except Exception:
+        await callback.answer("Неверный идентификатор заявки", show_alert=True)
+        return
+
+    info = assign_mapping.get(admin_msg_id)
+    if not info:
+        await callback.answer("Заявка не найдена или устарела.", show_alert=True)
+        return
+
+    # Обновляем состояние у водителя и только в его личном сообщении (вариант A)
+    if action == "accept":
+        info["driver_state"] = "Принять"
+        try:
+            await callback.message.edit_reply_markup(driver_keyboard(admin_msg_id, state="Принять"))
+            await callback.answer("Вы приняли заявку")
+        except Exception:
+            await callback.answer("OK")
+    elif action == "onway":
+        info["driver_state"] = "В пути за заказом"
+        try:
+            await callback.message.edit_reply_markup(driver_keyboard(admin_msg_id, state="В пути за заказом"))
+            await callback.answer("Отмечено: в пути за заказом")
+        except Exception:
+            await callback.answer("OK")
+    elif action == "got":
+        info["driver_state"] = "Заказ получен"
+        try:
+            await callback.message.edit_reply_markup(driver_keyboard(admin_msg_id, state="Заказ получен"))
+            await callback.answer("Отмечено: заказ получен")
+        except Exception:
+            await callback.answer("OK")
+    elif action == "done":
+        info["driver_state"] = "Выполнен"
+        try:
+            # оставляем пометку "Выполнен ✅"
+            await callback.message.edit_reply_markup(driver_keyboard(admin_msg_id, state="Выполнен"))
+            await callback.answer("Отмечено: выполнено (водитель)")
+        except Exception:
+            await callback.answer("OK")
+    else:
+        await callback.answer("Неизвестное действие")
+
+    # сохраняем изменения
+    assign_mapping[admin_msg_id] = info
+
+
+# --------------------------
+# Запуск
+# --------------------------
 async def main():
     await dp.start_polling(bot)
 
