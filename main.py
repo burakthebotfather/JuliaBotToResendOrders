@@ -281,11 +281,11 @@ async def handle_decision(callback: CallbackQuery):
 
 
 # --------------------------
-# Назначение водителя через reply админа на карточку
+# Назначение водителя через reply админа на карточку (улучшенный)
 # --------------------------
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
-    """Назначение водителя через @username."""
+    """Назначение водителя через @username — улучшенная версия с очисткой ника и понятными ошибками."""
     reply_to = message.reply_to_message
     if not reply_to:
         return
@@ -296,16 +296,30 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply("Информация по этой заявке устарела или не найдена.")
         return
 
-    target = (message.text or "").strip()
-    # ожидаем ровно один ник в формате @username
-    if not target.startswith("@") or " " in target:
-        await message.reply("Укажи ник в формате @username.")
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.reply("Пожалуйста, укажи ник в формате @username.")
         return
 
+    # Ищем первое вхождение @username в тексте
+    m = re.search(r"@([A-Za-z0-9_]{5,32})", raw)
+    if not m:
+        # Возможно, написано без @
+        token = raw.split()[0]
+        token = token.strip(".,:;!«»\"'()[]{}")
+        if re.fullmatch(r"[A-Za-z0-9_]{5,32}", token):
+            username = token
+        else:
+            await message.reply("Укажи ник в формате @username (или просто username).")
+            return
+    else:
+        username = m.group(1)
+
+    target = f"@{username}"
     orig_chat_id = info["orig_chat_id"]
     orig_msg_id = info["orig_msg_id"]
 
-    # Удаляем "Заказ принят..." если был
+    # Удаляем "Заказ принят..." если было
     accept_reply_id = info.get("accept_reply_id")
     if accept_reply_id:
         try:
@@ -314,7 +328,7 @@ async def handle_admin_assign_reply(message: Message):
             pass
         info["accept_reply_id"] = None
 
-    # Отправляем "Доставка для ..."
+    # Уведомляем исходный чат
     try:
         await bot.send_message(
             orig_chat_id,
@@ -325,20 +339,25 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply(f"Ошибка при уведомлении исходного чата: {e}")
         return
 
-    # --- НОВОЕ: отправляем дубликат карточки водителю в личку (вариант A) ---
-    username = target.lstrip("@")
+    # --- Поиск пользователя по нику ---
     try:
-        # получаем chat объекта водителя; если ник неверный - исключение
-        chat_obj = await bot.get_chat(f"@{username}")
+        chat_obj = await bot.get_chat(target)
         driver_id = chat_obj.id
     except Exception:
-        await message.reply(f"Не удалось найти пользователя {target}. Проверь ник и попробуй снова.")
-        return
+        try:
+            chat_obj = await bot.get_chat(username)
+            driver_id = chat_obj.id
+        except Exception:
+            await message.reply(
+                f"Не удалось найти пользователя {target}. Проверь ник.\n\n"
+                "Если ник верный, возможно пользователь не писал боту или закрыл личку."
+            )
+            return
 
-    # Формируем текст карточки для водителя (идентичен карточке админу)
-    admin_text = info.get("admin_text", "")
-    driver_text = admin_text
+    # Формируем текст карточки водителю
+    driver_text = info.get("admin_text", "")
 
+    # Отправляем карточку
     try:
         sent_to_driver = await bot.send_message(
             chat_id=driver_id,
@@ -346,7 +365,10 @@ async def handle_admin_assign_reply(message: Message):
             reply_markup=driver_keyboard(admin_sent_msg_id, state=None),
         )
     except Exception:
-        await message.reply(f"Не удалось отправить карточку {target}. Возможно, у пользователя закрыты личные сообщения.")
+        await message.reply(
+            f"Не удалось отправить карточку {target}. "
+            "Вероятно, у пользователя закрыты личные сообщения или он не начинал диалог с ботом."
+        )
         return
 
     # Обновляем mapping
@@ -355,11 +377,13 @@ async def handle_admin_assign_reply(message: Message):
     info["driver_state"] = None
     assign_mapping[admin_sent_msg_id] = info
 
-    # Подтверждаем админу и удаляем служебные сообщения через время
+    # Ответ админу + удаление служебных сообщений
     confirm = await message.reply("Готово — уведомил чат и отправил карточку водителю в личку.")
-    # удалим сообщения админа (его сообщение с ником и подтверждение) через 5 минут
-    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5 * 60))
-
+    asyncio.create_task(delete_messages_later(
+        UNIQUE_USER_ID,
+        [message.message_id, confirm.message_id],
+        delay=5 * 60
+    ))
 
 # --------------------------
 # Обработчики callback'ов — водитель (локально, вариант A)
