@@ -4,6 +4,7 @@ import os
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from difflib import ndiff
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -146,7 +147,6 @@ async def handle_message(message: Message):
     status = validate_contact(message.text or "")
     night = is_night_time()
 
-    # === AI ADDRESS CHECK ===
     missing_address = []
     try:
         addr = check_address_with_ai(message.text or "")
@@ -155,7 +155,7 @@ async def handle_message(message: Message):
         pass
 
     if night:
-        await message.reply("Уже не онлайн 🌃\nНакапливаю заявки — распределим утром.\nГрафик работы: 09:05 - 21:55 (без выходных).")
+        await message.reply("Уже не онлайн\nНакапливаю заявки — распределим утром.\nГрафик работы: 09:05 - 21:55 (без выходных).")
     else:
         if status == "missing":
             await message.reply(
@@ -177,26 +177,25 @@ async def handle_message(message: Message):
     warning = ""
     if missing_address:
         warning = (
-            "⚠️ <b>НЕПОЛНЫЙ АДРЕС</b>\n"
+            "НЕПОЛНЫЙ АДРЕС\n"
             f"Отсутствует: {', '.join(missing_address)}\n\n"
         )
 
     forward_body = header + warning + (message.text or "")
 
-    # === KEYBOARD ===
     if missing_address:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Уточнить адрес", callback_data="address:fix")],
-            [InlineKeyboardButton(text="🚗 Передать без уточнений (платно)", callback_data="address:skip")],
-            [InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject")],
+            [InlineKeyboardButton(text="Уточнить адрес", callback_data="address:fix")],
+            [InlineKeyboardButton(text="Передать без уточнений (платно)", callback_data="address:skip")],
+            [InlineKeyboardButton(text="Отклонить", callback_data="decision:reject")],
         ])
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🆗 ПРИНЯТЬ", callback_data="decision:accept"),
-                InlineKeyboardButton(text="⛔️ ОТКЛОНИТЬ", callback_data="decision:reject"),
+                InlineKeyboardButton(text="ПРИНЯТЬ", callback_data="decision:accept"),
+                InlineKeyboardButton(text="ОТКЛОНИТЬ", callback_data="decision:reject"),
             ],
-            [InlineKeyboardButton(text="✅ ВЫПОЛНЕН", callback_data="decision:done")]
+            [InlineKeyboardButton(text="ВЫПОЛНЕН", callback_data="decision:done")]
         ])
 
     sent = await bot.send_message(
@@ -211,7 +210,83 @@ async def handle_message(message: Message):
         "orig_msg_id": message.message_id,
         "accept_reply_id": None,
         "address_incomplete": bool(missing_address),
+        "original_text": message.text or "",
+        "edit_notification_id": None,
     }
+
+# ================== EDITED MESSAGE HANDLER ==================
+
+@dp.edited_message(F.chat.id.in_(ALLOWED_THREADS.keys()))
+async def handle_edited_message(message: Message):
+    info = None
+    for admin_msg_id, data in assign_mapping.items():
+        if data["orig_msg_id"] == message.message_id and data["orig_chat_id"] == message.chat.id:
+            info = data
+            break
+    if not info:
+        return
+
+    old_text = info.get("original_text", "")
+    new_text = message.text or ""
+    if old_text == new_text:
+        return
+
+    old_lines = set(old_text.splitlines())
+    new_lines = set(new_text.splitlines())
+
+    added = "\n".join([line for line in new_lines if line not in old_lines])
+    removed = "\n".join([line for line in old_lines if line not in new_lines])
+
+    diff_msg = "Обнаружены правки в исходной заявке!\n"
+    if added:
+        diff_msg += f"Добавлено:\n{added}\n"
+    if removed:
+        diff_msg += f"Исключено:\n<s>{removed}</s>"
+
+    sent_in_thread = await bot.send_message(
+        chat_id=message.chat.id,
+        text=diff_msg,
+        reply_to_message_id=message.message_id,
+        parse_mode="HTML"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Принять изменение", callback_data=f"accept_edit:{admin_msg_id}")]
+    ])
+
+    sent_to_user = await bot.send_message(
+        UNIQUE_USER_ID,
+        diff_msg,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+    info["edit_notification_id"] = sent_to_user.message_id
+    info["original_text"] = new_text
+
+# ================== ACCEPT EDIT CALLBACK ==================
+
+@dp.callback_query(F.data.startswith("accept_edit:"))
+async def accept_edit(callback: CallbackQuery):
+    admin_msg_id = int(callback.data.split(":")[1])
+    info = assign_mapping.get(admin_msg_id)
+    if not info:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+
+    await bot.send_message(
+        chat_id=info["orig_chat_id"],
+        text="Изменения приняты Исполнителем",
+        reply_to_message_id=info["orig_msg_id"]
+    )
+
+    await bot.edit_message_reply_markup(
+        chat_id=UNIQUE_USER_ID,
+        message_id=info.get("edit_notification_id"),
+        reply_markup=None
+    )
+
+    await callback.answer("Изменения приняты")
 
 # ================== ADDRESS DECISION ==================
 
@@ -221,15 +296,15 @@ async def handle_address(callback: CallbackQuery):
 
     if action == "fix":
         await callback.message.reply(
-            "✏️ Пожалуйста, дополните адрес:\n"
+            "Пожалуйста, дополните адрес:\n"
             "улица, дом, подъезд, этаж, квартира"
         )
         await callback.answer("Ожидаю уточнение")
 
     elif action == "skip":
         await callback.message.reply(
-            "🚗 Заявка передана без уточнения адреса.\n"
-            "💰 Уточнение — платная опция для водителя."
+            "Заявка передана без уточнения адреса.\n"
+            "Уточнение — платная опция для водителя."
         )
         await callback.answer("Передано без уточнений")
 
@@ -248,7 +323,7 @@ async def handle_decision(callback: CallbackQuery):
     orig_msg_id = info["orig_msg_id"]
 
     if action == "accept":
-        sent = await bot.send_message(orig_chat_id, "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.", reply_to_message_id=orig_msg_id)
+        sent = await bot.send_message(orig_chat_id, "Заказ принят в работу.", reply_to_message_id=orig_msg_id)
         info["accept_reply_id"] = sent.message_id
 
     elif action == "reject":
