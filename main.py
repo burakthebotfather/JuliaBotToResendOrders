@@ -231,24 +231,22 @@ async def handle_edited_message(message: Message):
     if old_text == new_text:
         return
 
-    old_lines = set(old_text.splitlines())
-    new_lines = set(new_text.splitlines())
+    diff_content = generate_diff(old_text, new_text)
 
-    added = "\n".join([line for line in new_lines if line not in old_lines])
-    removed = "\n".join([line for line in old_lines if line not in new_lines])
-
-    diff_msg = "Обнаружены правки в исходной заявке!\n"
-    if added:
-        diff_msg += f"Добавлено:\n{added}\n"
-    if removed:
-        diff_msg += f"Исключено:\n<s>{removed}</s>"
-
-    sent_in_thread = await bot.send_message(
+    # Отправляем в thread_id без шапки
+    diff_msg_thread = "Обнаружены правки в исходной заявке!\n" + diff_content
+    await bot.send_message(
         chat_id=message.chat.id,
-        text=diff_msg,
+        text=diff_msg_thread,
         reply_to_message_id=message.message_id,
         parse_mode="HTML"
     )
+
+    # Отправляем пользователю с уникальным ID с шапкой
+    request_number = info.get("request_number", get_request_number())
+    chat_name = CHAT_NAMES.get(info["orig_chat_id"], f"Chat {info['orig_chat_id']}")
+    header = f"UPD 🆙 к {request_number}\n{chat_name}\n\n"
+    diff_msg_user = header + "Обнаружены правки в исходной заявке!\n" + diff_content
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Принять изменение", callback_data=f"accept_edit:{admin_msg_id}")]
