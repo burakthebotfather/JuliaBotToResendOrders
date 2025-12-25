@@ -237,11 +237,7 @@ async def handle_edited_message(message: Message):
     added = "\n".join([line for line in new_lines if line not in old_lines])
     removed = "\n".join([line for line in old_lines if line not in new_lines])
 
-    diff_msg = (
-        "<b>Обнаружены правки в исходной заявке!</b>\n"
-        f"<b>{request_number}</b>\n"
-        f"<b>{chat_name}</b>\n\n"
-    )
+    diff_msg = "<b>Обнаружены правки в исходной заявке!</b>\n\n"
     
     if added:
         diff_msg += (
