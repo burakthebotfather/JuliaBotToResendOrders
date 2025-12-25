@@ -1,6 +1,7 @@
 import asyncio
 import re
 import os
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -13,13 +14,20 @@ from aiogram.types import (
     CallbackQuery,
 )
 
+from openai import OpenAI
+
+# ================== CONFIG ==================
+
 API_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TOKEN_HERE")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 UNIQUE_USER_ID = int(os.getenv("UNIQUE_USER_ID", 542345855))
 
-# Часовой пояс (UTC+3)
 TZ = ZoneInfo("Europe/Minsk")
 
-# chat_id -> thread_id
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ================== THREADS ==================
+
 ALLOWED_THREADS = {
     -1002079167705: 7340,
     -1002936236597: 4,
@@ -34,7 +42,6 @@ ALLOWED_THREADS = {
     -1002538985387: 4,
 }
 
-# chat_id -> readable name
 CHAT_NAMES = {
     -1002079167705: "A. Mousse Art Bakery - Белинского, 23",
     -1002936236597: "B. Millionroz.by - Тимирязева, 67",
@@ -45,19 +52,53 @@ CHAT_NAMES = {
     -1002477650634: "I. Cvetok.by - Восточная, 41",
     -1003204457764: "J. Jungle.by - Неманская, 2",
     -1002660511483: "K. Pastel Flowers - Сурганова, 31",
-    -1002360529455: "333. ТЕСТ БОТОВ - 1-й Нагатинский пр-д",
+    -1002360529455: "333. ТЕСТ БОТОВ",
     -1002538985387: "L. Lamour.by - Кропоткина, 84",
 }
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# Счётчик заявок по дате
 message_counter = {"date": None, "count": 0}
 
-# admin_msg_id -> {orig_chat_id, orig_msg_id, accept_reply_id (если есть)}
+# admin_msg_id -> data
 assign_mapping: dict[int, dict] = {}
 
+# ================== AI PROMPT ==================
+
+ADDRESS_AI_PROMPT = """
+Ты помощник службы доставки.
+
+Проверь, содержит ли текст заявки следующие данные:
+- street (улица)
+- house (номер дома)
+- entrance (подъезд)
+- floor (этаж)
+- apartment (квартира)
+
+Верни СТРОГО JSON:
+{
+  "street": true/false,
+  "house": true/false,
+  "entrance": true/false,
+  "floor": true/false,
+  "apartment": true/false,
+  "comment": "кратко, что отсутствует"
+}
+"""
+
+def check_address_with_ai(text: str) -> dict:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": ADDRESS_AI_PROMPT},
+            {"role": "user", "content": text}
+        ],
+        temperature=0
+    )
+    return json.loads(response.choices[0].message.content)
+
+# ================== HELPERS ==================
 
 def get_request_number():
     today = datetime.now(TZ).strftime("%d.%m.%Y")
@@ -67,25 +108,21 @@ def get_request_number():
     message_counter["count"] += 1
     return f"{message_counter['count']:02d} / {today}"
 
-
 def is_night_time() -> bool:
     now = datetime.now(TZ).time()
     return now >= datetime.strptime("22:00", "%H:%M").time() or now < datetime.strptime("08:00", "%H:%M").time()
 
-
 def validate_contact(text: str) -> str:
     if not text:
         return "missing"
-    cleaned = text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-    belarus_pattern = re.compile(r"(\+375\d{9}|80(25|29|33|44)\d{7})")
-    if belarus_pattern.search(cleaned):
+    cleaned = re.sub(r"[ \-\(\)]", "", text)
+    if re.search(r"(\+375\d{9}|80(25|29|33|44)\d{7})", cleaned):
         return "ok"
     if "@" in text:
         return "ok"
     if re.search(r"\+?\d{7,}", cleaned):
         return "invalid"
     return "missing"
-
 
 async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int = 300):
     await asyncio.sleep(delay)
@@ -95,10 +132,10 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
         except Exception:
             pass
 
+# ================== MAIN HANDLER ==================
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
-    """Обработка заявок из чатов."""
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
     if len(message.text or "") < 50:
@@ -109,48 +146,50 @@ async def handle_message(message: Message):
     status = validate_contact(message.text or "")
     night = is_night_time()
 
+    # === AI ADDRESS CHECK ===
+    missing_address = []
+    try:
+        addr = check_address_with_ai(message.text or "")
+        missing_address = [k for k, v in addr.items() if v is False and k != "comment"]
+    except Exception:
+        pass
+
     if night:
-        try:
-            await message.reply("Уже не онлайн 🌃\nНакапливаю заявки - распределим утром.")
-        except Exception:
-            pass
+        await message.reply("Уже не онлайн 🌃\nНакапливаю заявки — распределим утром.")
     else:
         if status == "missing":
-            try:
-                await message.reply(
-                    "Номер для связи не обнаружен. "
-                    "Доставка возможна без предварительного звонка получателю. "
-                    "Риски - на отправителе."
-                )
-            except Exception:
-                pass
+            await message.reply("Номер для связи не обнаружен. Риски — на отправителе.")
         elif status == "invalid":
-            try:
-                await message.reply(
-                    "Заказ не принят в работу. "
-                    "Номер телефона получателя в заявке указан некорректно. "
-                    "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram, используя символ @."
-                )
-            except Exception:
-                pass
+            await message.reply("❌ Некорректный номер телефона.")
 
-    # Карточка админу
     request_number = get_request_number()
-    chat_name = CHAT_NAMES.get(message.chat.id, f"Chat {message.chat.id}")
+    chat_name = CHAT_NAMES.get(message.chat.id, "Чат")
     header = f"{request_number}\n{chat_name}\n\n"
-    forward_body = header + (message.text or "")
-    if status == "invalid":
-        forward_body = "❌ ОТКЛОНЕН ❌\n\n" + forward_body
-    if night:
-        forward_body = "НОЧНОЙ ЗАКАЗ 🌙\n\n" + forward_body
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
-        ],
-        [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
-    ])
+    warning = ""
+    if missing_address:
+        warning = (
+            "⚠️ <b>НЕПОЛНЫЙ АДРЕС</b>\n"
+            f"Отсутствует: {', '.join(missing_address)}\n\n"
+        )
+
+    forward_body = header + warning + (message.text or "")
+
+    # === KEYBOARD ===
+    if missing_address:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Уточнить адрес", callback_data="address:fix")],
+            [InlineKeyboardButton(text="🚗 Передать без уточнений (платно)", callback_data="address:skip")],
+            [InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject")],
+        ])
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
+            ],
+            [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
+        ])
 
     sent = await bot.send_message(
         UNIQUE_USER_ID,
@@ -163,115 +202,89 @@ async def handle_message(message: Message):
         "orig_chat_id": message.chat.id,
         "orig_msg_id": message.message_id,
         "accept_reply_id": None,
+        "address_incomplete": bool(missing_address),
     }
 
+# ================== ADDRESS DECISION ==================
+
+@dp.callback_query(F.data.startswith("address:"))
+async def handle_address(callback: CallbackQuery):
+    action = callback.data.split(":")[1]
+
+    if action == "fix":
+        await callback.message.reply(
+            "✏️ Пожалуйста, дополните адрес:\n"
+            "улица, дом, подъезд, этаж, квартира"
+        )
+        await callback.answer("Ожидаю уточнение")
+
+    elif action == "skip":
+        await callback.message.reply(
+            "🚗 Заявка передана без уточнения адреса.\n"
+            "💰 Уточнение — платная опция для водителя."
+        )
+        await callback.answer("Передано без уточнений")
+
+# ================== DECISIONS ==================
 
 @dp.callback_query(F.data.startswith("decision:"))
 async def handle_decision(callback: CallbackQuery):
-    """Принят/отклонён/выполнен."""
     admin_msg_id = callback.message.message_id
     info = assign_mapping.get(admin_msg_id)
     if not info:
-        await callback.answer("Заявка устарела или не найдена.", show_alert=True)
+        await callback.answer("Заявка не найдена", show_alert=True)
         return
 
-    action = callback.data.split(":", 1)[1]
+    action = callback.data.split(":")[1]
     orig_chat_id = info["orig_chat_id"]
     orig_msg_id = info["orig_msg_id"]
 
     if action == "accept":
-        try:
-            sent = await bot.send_message(orig_chat_id, "Заказ принят в работу.", reply_to_message_id=orig_msg_id)
-            info["accept_reply_id"] = sent.message_id
-        except Exception:
-            pass
-        popup = "Отметил как принятый."
-
-        # оставляем только кнопку "Выполнен"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
-        ])
-        await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
+        sent = await bot.send_message(orig_chat_id, "Заказ принят в работу.", reply_to_message_id=orig_msg_id)
+        info["accept_reply_id"] = sent.message_id
 
     elif action == "reject":
-        try:
-            await bot.send_message(
-                orig_chat_id,
-                "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.",
-                reply_to_message_id=orig_msg_id,
-            )
-        except Exception:
-            pass
-        popup = "Отметил как отклонённый."
+        await bot.send_message(orig_chat_id, "Заказ отклонён.", reply_to_message_id=orig_msg_id)
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
-        ])
-        await bot.edit_message_reply_markup(UNIQUE_USER_ID, admin_msg_id, reply_markup=kb)
-
-    else:  # done
-        try:
-            await bot.delete_message(chat_id=UNIQUE_USER_ID, message_id=admin_msg_id)
-        except Exception:
-            pass
+    else:
+        await bot.delete_message(UNIQUE_USER_ID, admin_msg_id)
         assign_mapping.pop(admin_msg_id, None)
-        await callback.answer("Карточка удалена.")
+        await callback.answer("Карточка удалена")
         return
 
-    assign_mapping[admin_msg_id] = info
-    await callback.answer(popup)
+    await callback.answer("Готово")
 
+# ================== ASSIGN DRIVER ==================
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
-    """Назначение водителя через @username."""
     reply_to = message.reply_to_message
-    if not reply_to:
-        return
-
-    admin_sent_msg_id = reply_to.message_id
-    info = assign_mapping.get(admin_sent_msg_id)
+    info = assign_mapping.get(reply_to.message_id)
     if not info:
-        await message.reply("Информация по этой заявке устарела или не найдена.")
         return
 
     target = (message.text or "").strip()
-    if not target.startswith("@") or " " in target:
-        await message.reply("Укажи ник в формате @username.")
+    if not target.startswith("@"):
+        await message.reply("Укажи ник в формате @username")
         return
 
-    orig_chat_id = info["orig_chat_id"]
-    orig_msg_id = info["orig_msg_id"]
-
-    # Удаляем "Заказ принят..." если был
-    accept_reply_id = info.get("accept_reply_id")
-    if accept_reply_id:
-        try:
-            await bot.delete_message(chat_id=orig_chat_id, message_id=accept_reply_id)
-        except Exception:
-            pass
-        info["accept_reply_id"] = None
-
-    # Отправляем "Доставка для ..."
-    try:
-        await bot.send_message(
-            orig_chat_id,
-            f"Доставка для {target}",
-            reply_to_message_id=orig_msg_id,
-        )
-    except Exception as e:
-        await message.reply(f"Ошибка при уведомлении исходного чата: {e}")
-        return
+    await bot.send_message(
+        info["orig_chat_id"],
+        f"Доставка для {target}",
+        reply_to_message_id=info["orig_msg_id"]
+    )
 
     confirm = await message.reply("Готово — уведомил чат.")
-    asyncio.create_task(delete_messages_later(UNIQUE_USER_ID, [message.message_id, confirm.message_id], delay=5 * 60))
+    asyncio.create_task(delete_messages_later(
+        UNIQUE_USER_ID,
+        [message.message_id, confirm.message_id],
+        delay=300
+    ))
 
-    assign_mapping[admin_sent_msg_id] = info
-
+# ================== RUN ==================
 
 async def main():
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
