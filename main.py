@@ -158,9 +158,17 @@ async def handle_message(message: Message):
         await message.reply("Уже не онлайн 🌃\nНакапливаю заявки — распределим утром.")
     else:
         if status == "missing":
-            await message.reply("Номер для связи не обнаружен. Риски — на отправителе.")
+            await message.reply(
+                "Номер для связи не обнаружен. "
+                "Доставка возможна без предварительного звонка получателю. "
+                "Риски - на отправителе."
+            )
         elif status == "invalid":
-            await message.reply("❌ Некорректный номер телефона.")
+            await message.reply (
+                "Заказ не принят в работу. "
+                "Номер телефона получателя в заявке указан некорректно. "
+                "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram"
+            )
 
     request_number = get_request_number()
     chat_name = CHAT_NAMES.get(message.chat.id, "Чат")
@@ -185,10 +193,10 @@ async def handle_message(message: Message):
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Принять", callback_data="decision:accept"),
+                InlineKeyboardButton(text="✉️ Принять", callback_data="decision:accept"),
                 InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
             ],
-            [InlineKeyboardButton(text="🟢 Выполнен", callback_data="decision:done")]
+            [InlineKeyboardButton(text=" Выполнен", callback_data="decision:done")]
         ])
 
     sent = await bot.send_message(
