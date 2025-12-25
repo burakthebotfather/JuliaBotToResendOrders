@@ -243,6 +243,8 @@ async def handle_edited_message(message: Message):
         diff_msg += (
             "➕Добавлено:\n"
             f"<blockquote>{added}</blockquote>\n"
+            f"<b>{request_number}</b>\n"
+            f"<b>{chat_name}</b>\n\n"
         )
         
     if removed:
