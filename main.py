@@ -259,7 +259,7 @@ async def handle_edited_message(message: Message):
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Принять изменение", callback_data=f"accept_edit:{admin_msg_id}")]
+        [InlineKeyboardButton(text="принять изменения", callback_data=f"accept_edit:{admin_msg_id}")]
     ])
 
     sent_to_user = await bot.send_message(
@@ -284,7 +284,7 @@ async def accept_edit(callback: CallbackQuery):
 
     await bot.send_message(
         chat_id=info["orig_chat_id"],
-        text="Изменения приняты Исполнителем",
+        text="Изменения приняты Исполнителем.",
         reply_to_message_id=info["orig_msg_id"]
     )
 
@@ -294,7 +294,7 @@ async def accept_edit(callback: CallbackQuery):
         reply_markup=None
     )
 
-    await callback.answer("Изменения приняты")
+    await callback.answer("изменения приняты")
 
 # ================== ADDRESS DECISION ==================
 
