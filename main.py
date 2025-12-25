@@ -192,10 +192,10 @@ async def handle_message(message: Message):
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="ПРИНЯТЬ", callback_data="decision:accept"),
-                InlineKeyboardButton(text="ОТКЛОНИТЬ", callback_data="decision:reject"),
+                InlineKeyboardButton(text="🆗 ПРИНЯТЬ", callback_data="decision:accept"),
+                InlineKeyboardButton(text="⛔️ ОТКЛОНИТЬ", callback_data="decision:reject"),
             ],
-            [InlineKeyboardButton(text="ВЫПОЛНЕН", callback_data="decision:done")]
+            [InlineKeyboardButton(text="✅ ВЫПОЛНЕН", callback_data="decision:done")]
         ])
 
     sent = await bot.send_message(
