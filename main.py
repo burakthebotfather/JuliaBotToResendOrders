@@ -237,11 +237,19 @@ async def handle_edited_message(message: Message):
     added = "\n".join([line for line in new_lines if line not in old_lines])
     removed = "\n".join([line for line in old_lines if line not in new_lines])
 
-    diff_msg = "Обнаружены правки в исходной заявке!\n"
-    if added:
-        diff_msg += f"Добавлено:\n{added}\n"
-    if removed:
-        diff_msg += f"Исключено:\n<s>{removed}</s>"
+    diff_msg = "<b>Обнаружены правки в исходной заявке!</b>\n\n"
+
+if added:
+    diff_msg += (
+        "➕Добавлено:\n"
+        f"<blockquote>{added}</blockquote>\n"
+    )
+
+if removed:
+    diff_msg += (
+        "➖Исключено:\n"
+        f"<s>{removed}</s>"
+    )
 
     sent_in_thread = await bot.send_message(
         chat_id=message.chat.id,
@@ -276,7 +284,7 @@ async def accept_edit(callback: CallbackQuery):
 
     await bot.send_message(
         chat_id=info["orig_chat_id"],
-        text="Изменения приняты Исполнителем",
+        text="Изменения подтверждены.",
         reply_to_message_id=info["orig_msg_id"]
     )
 
