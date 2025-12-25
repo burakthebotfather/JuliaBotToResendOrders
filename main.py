@@ -4,7 +4,7 @@ import os
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from difflib import SequenceMatcher
+from difflib import ndiff
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -14,6 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
 )
+
 from openai import OpenAI
 
 # ================== CONFIG ==================
@@ -23,6 +24,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 UNIQUE_USER_ID = int(os.getenv("UNIQUE_USER_ID", 542345855))
 
 TZ = ZoneInfo("Europe/Minsk")
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ================== THREADS ==================
@@ -59,6 +61,8 @@ bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 message_counter = {"date": None, "count": 0}
+
+# admin_msg_id -> data
 assign_mapping: dict[int, dict] = {}
 
 # ================== AI PROMPT ==================
@@ -129,20 +133,6 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
         except Exception:
             pass
 
-def generate_diff(old_text: str, new_text: str) -> str:
-    sm = SequenceMatcher(None, old_text, new_text)
-    result = ""
-    for opcode, i1, i2, j1, j2 in sm.get_opcodes():
-        if opcode == "equal":
-            result += new_text[j1:j2]
-        elif opcode == "insert":
-            result += new_text[j1:j2]
-        elif opcode == "delete":
-            result += f"<s>{old_text[i1:i2]}</s>"
-        elif opcode == "replace":
-            result += f"<s>{old_text[i1:i2]}</s>{new_text[j1:j2]}"
-    return result
-
 # ================== MAIN HANDLER ==================
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
@@ -174,7 +164,7 @@ async def handle_message(message: Message):
                 "Риски - на отправителе."
             )
         elif status == "invalid":
-            await message.reply(
+            await message.reply (
                 "Заказ не принят в работу. "
                 "Номер телефона получателя в заявке указан некорректно. "
                 "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram, используя символ @."
@@ -187,7 +177,7 @@ async def handle_message(message: Message):
     warning = ""
     if missing_address:
         warning = (
-            "⚠️ НЕПОЛНЫЙ АДРЕС\n"
+            "НЕПОЛНЫЙ АДРЕС\n"
             f"Отсутствует: {', '.join(missing_address)}\n\n"
         )
 
@@ -195,9 +185,9 @@ async def handle_message(message: Message):
 
     if missing_address:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✏️ Уточнить адрес", callback_data="address:fix")],
-            [InlineKeyboardButton(text="🚗 Передать без уточнений (платно)", callback_data="address:skip")],
-            [InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject")],
+            [InlineKeyboardButton(text="Уточнить адрес", callback_data="address:fix")],
+            [InlineKeyboardButton(text="Передать без уточнений (платно)", callback_data="address:skip")],
+            [InlineKeyboardButton(text="Отклонить", callback_data="decision:reject")],
         ])
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -221,8 +211,82 @@ async def handle_message(message: Message):
         "accept_reply_id": None,
         "address_incomplete": bool(missing_address),
         "original_text": message.text or "",
-        "request_number": request_number,
+        "edit_notification_id": None,
     }
+
+# ================== EDITED MESSAGE HANDLER ==================
+
+@dp.edited_message(F.chat.id.in_(ALLOWED_THREADS.keys()))
+async def handle_edited_message(message: Message):
+    info = None
+    for admin_msg_id, data in assign_mapping.items():
+        if data["orig_msg_id"] == message.message_id and data["orig_chat_id"] == message.chat.id:
+            info = data
+            break
+    if not info:
+        return
+
+    old_text = info.get("original_text", "")
+    new_text = message.text or ""
+    if old_text == new_text:
+        return
+
+    old_lines = set(old_text.splitlines())
+    new_lines = set(new_text.splitlines())
+
+    added = "\n".join([line for line in new_lines if line not in old_lines])
+    removed = "\n".join([line for line in old_lines if line not in new_lines])
+
+    diff_msg = "Обнаружены правки в исходной заявке!\n"
+    if added:
+        diff_msg += f"Добавлено:\n{added}\n"
+    if removed:
+        diff_msg += f"Исключено:\n<s>{removed}</s>"
+
+    sent_in_thread = await bot.send_message(
+        chat_id=message.chat.id,
+        text=diff_msg,
+        reply_to_message_id=message.message_id,
+        parse_mode="HTML"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Принять изменение", callback_data=f"accept_edit:{admin_msg_id}")]
+    ])
+
+    sent_to_user = await bot.send_message(
+        UNIQUE_USER_ID,
+        diff_msg,
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+    info["edit_notification_id"] = sent_to_user.message_id
+    info["original_text"] = new_text
+
+# ================== ACCEPT EDIT CALLBACK ==================
+
+@dp.callback_query(F.data.startswith("accept_edit:"))
+async def accept_edit(callback: CallbackQuery):
+    admin_msg_id = int(callback.data.split(":")[1])
+    info = assign_mapping.get(admin_msg_id)
+    if not info:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+
+    await bot.send_message(
+        chat_id=info["orig_chat_id"],
+        text="Изменения приняты Исполнителем",
+        reply_to_message_id=info["orig_msg_id"]
+    )
+
+    await bot.edit_message_reply_markup(
+        chat_id=UNIQUE_USER_ID,
+        message_id=info.get("edit_notification_id"),
+        reply_markup=None
+    )
+
+    await callback.answer("Изменения приняты")
 
 # ================== ADDRESS DECISION ==================
 
@@ -232,15 +296,15 @@ async def handle_address(callback: CallbackQuery):
 
     if action == "fix":
         await callback.message.reply(
-            "✏️ Пожалуйста, дополните адрес:\n"
+            "Пожалуйста, дополните адрес:\n"
             "улица, дом, подъезд, этаж, квартира"
         )
         await callback.answer("Ожидаю уточнение")
 
     elif action == "skip":
         await callback.message.reply(
-            "🚗 Заявка передана без уточнения адреса.\n"
-            "💰 Уточнение — платная опция для водителя."
+            "Заявка передана без уточнения адреса.\n"
+            "Уточнение — платная опция для водителя."
         )
         await callback.answer("Передано без уточнений")
 
@@ -265,7 +329,7 @@ async def handle_decision(callback: CallbackQuery):
     elif action == "reject":
         await bot.send_message(orig_chat_id, "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.", reply_to_message_id=orig_msg_id)
 
-    else:  # done
+    else:
         await bot.delete_message(UNIQUE_USER_ID, admin_msg_id)
         assign_mapping.pop(admin_msg_id, None)
         await callback.answer("Карточка удалена")
@@ -299,84 +363,6 @@ async def handle_admin_assign_reply(message: Message):
         [message.message_id, confirm.message_id],
         delay=300
     ))
-
-# ================== EDITED MESSAGE HANDLER ==================
-
-@dp.edited_message(F.chat.id.in_(ALLOWED_THREADS.keys()))
-async def handle_edited_message(message: Message):
-    # Ищем соответствующую заявку
-    info = None
-    for admin_msg_id, data in assign_mapping.items():
-        if data["orig_msg_id"] == message.message_id and data["orig_chat_id"] == message.chat.id:
-            info = data
-            break
-    if not info:
-        return
-
-    old_text = info.get("original_text", "")
-    new_text = message.text or ""
-    if old_text == new_text:
-        return
-
-    diff_content = generate_diff(old_text, new_text)
-
-    # Отправляем в thread_id без шапки
-    diff_msg_thread = "Обнаружены правки в исходной заявке!\n" + diff_content
-    await bot.send_message(
-        chat_id=message.chat.id,
-        text=diff_msg_thread,
-        reply_to_message_id=message.message_id,
-        parse_mode="HTML"
-    )
-
-    # Отправляем пользователю с уникальным ID с шапкой
-    request_number = info.get("request_number", get_request_number())
-    chat_name = CHAT_NAMES.get(info["orig_chat_id"], f"Chat {info['orig_chat_id']}")
-    header = f"UPD 🆙 к {request_number}\n{chat_name}\n\n"
-    diff_msg_user = header + "Обнаружены правки в исходной заявке!\n" + diff_content
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Принять изменение", callback_data=f"accept_edit:{admin_msg_id}")]
-    ])
-
-    sent_to_user = await bot.send_message(
-        UNIQUE_USER_ID,
-        diff_msg_user,
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-
-    info["edit_notification_id"] = sent_to_user.message_id
-    info["original_text"] = new_text
-
-# ================== ACCEPT EDIT ==================
-
-@dp.callback_query(F.data.startswith("accept_edit:"))
-async def handle_accept_edit(callback: CallbackQuery):
-    admin_msg_id = int(callback.data.split(":")[1])
-    info = assign_mapping.get(admin_msg_id)
-    if not info:
-        await callback.answer("Заявка не найдена", show_alert=True)
-        return
-
-    # Отправляем сообщение в thread_id о принятии изменений
-    await bot.send_message(
-        chat_id=info["orig_chat_id"],
-        reply_to_message_id=info["orig_msg_id"],
-        text="изменения приняты Исполнителем"
-    )
-
-    # Убираем кнопку у пользователя
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=UNIQUE_USER_ID,
-            message_id=info.get("edit_notification_id"),
-            reply_markup=None
-        )
-    except Exception:
-        pass
-
-    await callback.answer("Изменения приняты")
 
 # ================== RUN ==================
 
