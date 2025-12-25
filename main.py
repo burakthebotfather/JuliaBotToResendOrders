@@ -110,7 +110,7 @@ def get_request_number():
 
 def is_night_time() -> bool:
     now = datetime.now(TZ).time()
-    return now >= datetime.strptime("22:00", "%H:%M").time() or now < datetime.strptime("08:00", "%H:%M").time()
+    return now >= datetime.strptime("21:55", "%H:%M").time() or now < datetime.strptime("09:05", "%H:%M").time()
 
 def validate_contact(text: str) -> str:
     if not text:
@@ -155,7 +155,7 @@ async def handle_message(message: Message):
         pass
 
     if night:
-        await message.reply("Уже не онлайн 🌃\nНакапливаю заявки — распределим утром.")
+        await message.reply("Уже не онлайн 🌃\nНакапливаю заявки — распределим утром.\nГрафик работы: 09:05 - 21:55 (без выходных).")
     else:
         if status == "missing":
             await message.reply(
@@ -167,7 +167,7 @@ async def handle_message(message: Message):
             await message.reply (
                 "Заказ не принят в работу. "
                 "Номер телефона получателя в заявке указан некорректно. "
-                "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram"
+                "Пожалуйста, укажите номер в формате +375ХХХХХХХХХ или ник Telegram, используя символ @."
             )
 
     request_number = get_request_number()
@@ -193,10 +193,10 @@ async def handle_message(message: Message):
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✉️ Принять", callback_data="decision:accept"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data="decision:reject"),
+                InlineKeyboardButton(text="🆗", callback_data="decision:accept"),
+                InlineKeyboardButton(text="⛔️", callback_data="decision:reject"),
             ],
-            [InlineKeyboardButton(text=" Выполнен", callback_data="decision:done")]
+            [InlineKeyboardButton(text="Выполнен", callback_data="decision:done")]
         ])
 
     sent = await bot.send_message(
@@ -252,7 +252,7 @@ async def handle_decision(callback: CallbackQuery):
         info["accept_reply_id"] = sent.message_id
 
     elif action == "reject":
-        await bot.send_message(orig_chat_id, "Заказ отклонён.", reply_to_message_id=orig_msg_id)
+        await bot.send_message(orig_chat_id, "Заказ не принят в работу. ", reply_to_message_id=orig_msg_id)
 
     else:
         await bot.delete_message(UNIQUE_USER_ID, admin_msg_id)
