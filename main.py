@@ -248,11 +248,11 @@ async def handle_decision(callback: CallbackQuery):
     orig_msg_id = info["orig_msg_id"]
 
     if action == "accept":
-        sent = await bot.send_message(orig_chat_id, "Заказ принят в работу.", reply_to_message_id=orig_msg_id)
+        sent = await bot.send_message(orig_chat_id, "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.", reply_to_message_id=orig_msg_id)
         info["accept_reply_id"] = sent.message_id
 
     elif action == "reject":
-        await bot.send_message(orig_chat_id, "Заказ не принят в работу. ", reply_to_message_id=orig_msg_id)
+        await bot.send_message(orig_chat_id, "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.", reply_to_message_id=orig_msg_id)
 
     else:
         await bot.delete_message(UNIQUE_USER_ID, admin_msg_id)
