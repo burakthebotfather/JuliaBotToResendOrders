@@ -155,7 +155,7 @@ async def handle_message(message: Message):
         pass
 
     if night:
-        await message.reply("Уже не онлайн\nНакапливаю заявки — распределим утром.\nГрафик работы: 09:05 - 21:55 (без выходных).")
+        await message.reply("Уже не онлайн🌃\nНакапливаю заявки — распределим утром.\nГрафик работы: 09:05 - 21:55 (без выходных).")
     else:
         if status == "missing":
             await message.reply(
@@ -191,12 +191,13 @@ async def handle_message(message: Message):
         ])
     else:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🆗 ПРИНЯТЬ", callback_data="decision:accept"),
-                InlineKeyboardButton(text="⛔️ ОТКЛОНИТЬ", callback_data="decision:reject"),
-            ],
-            [InlineKeyboardButton(text="✅ ВЫПОЛНЕН", callback_data="decision:done")]
-        ])
+    [
+        InlineKeyboardButton(text="👍 ПРИНЯТЬ", callback_data="decision:accept"),
+        InlineKeyboardButton(text="⛔️ ОТКЛОНИТЬ", callback_data="decision:reject"),
+        InlineKeyboardButton(text="🛠 ДОРАБОТКА", callback_data="decision:rework"),
+    ],
+    [InlineKeyboardButton(text="✅ ВЫПОЛНЕН", callback_data="decision:done")]
+])
 
     sent = await bot.send_message(
         UNIQUE_USER_ID,
@@ -336,6 +337,17 @@ async def handle_decision(callback: CallbackQuery):
 
     elif action == "reject":
         await bot.send_message(orig_chat_id, "Заказ не принят в работу. Доставка невозможна в пределах предложенного интервала.", reply_to_message_id=orig_msg_id)
+
+    elif action == "rework":
+        await bot.send_message(orig_chat_id,
+        "Заказ принят в работу с ограничениями: требуется доработка исходной заявки.\n\n"
+        "🏠 Для жилых помещений указываются: адрес, подъезд, этаж, номер квартиры, комментарий (при необходимости).\n\n"
+        "🏢 Для коммерческих помещений указываются: адрес, номер офиса/блока/секции, ориентиры входа, режим доступа и иные сведения, необходимые для осуществления доставки.\n\n"
+        "Пожалуйста, уточните недостающие данные и откорректируйте исходную заявку до передачи товара Исполнителю. После передачи товара, уточнение производится силами Исполнителя платно, согласно принятым тарифам.",
+        reply_to_message_id=orig_msg_id
+    )
+    await callback.answer("Запрос доработки отправлен")
+    return
 
     else:
         await bot.delete_message(UNIQUE_USER_ID, admin_msg_id)
