@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from difflib import ndiff
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
     Message,
@@ -64,6 +64,10 @@ message_counter = {"date": None, "count": 0}
 
 # admin_msg_id -> data
 assign_mapping: dict[int, dict] = {}
+
+# username (без @, lowercase) -> chat_id, заполняется автоматически
+# при любом приватном сообщении пользователя боту (например /start)
+known_users: dict[str, int] = {}
 
 # ================== AI PROMPT ==================
 
@@ -125,6 +129,14 @@ def validate_contact(text: str) -> str:
         return "invalid"
     return "missing"
 
+def build_message_link(chat_id: int, thread_id: int | None, message_id: int) -> str:
+    """Формирует ссылку на сообщение в супергруппе (с учётом темы/thread, если она есть)."""
+    chat_str = str(chat_id)
+    internal_id = chat_str[4:] if chat_str.startswith("-100") else str(abs(chat_id))
+    if thread_id:
+        return f"https://t.me/c/{internal_id}/{thread_id}/{message_id}"
+    return f"https://t.me/c/{internal_id}/{message_id}"
+
 async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int = 300):
     await asyncio.sleep(delay)
     for m_id in message_ids:
@@ -132,6 +144,19 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
             await bot.delete_message(chat_id=chat_id, message_id=m_id)
         except Exception:
             pass
+
+# ================== MIDDLEWARE: ЗАПОМИНАЕМ ПОЛЬЗОВАТЕЛЕЙ ==================
+# Чтобы бот мог переслать заказ исполнителю по нику, нужно знать его chat_id.
+# Узнать его можно только если пользователь хотя бы раз писал боту в личку
+# (например, нажал /start). Запоминаем это для всех приватных чатов.
+
+class TrackUsersMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: Message, data):
+        if event.chat.type == "private" and event.from_user and event.from_user.username:
+            known_users[event.from_user.username.lower()] = event.chat.id
+        return await handler(event, data)
+
+dp.message.middleware(TrackUsersMiddleware())
 
 # ================== MAIN HANDLER ==================
 
@@ -213,6 +238,11 @@ async def handle_message(message: Message):
         "address_incomplete": bool(missing_address),
         "original_text": message.text or "",
         "edit_notification_id": None,
+        "request_number": request_number,
+        "chat_name": chat_name,
+        "driver_chat_id": None,
+        "driver_msg_id": None,
+        "driver_label": None,
     }
 
 # ================== EDITED MESSAGE HANDLER ==================
@@ -220,9 +250,11 @@ async def handle_message(message: Message):
 @dp.edited_message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_edited_message(message: Message):
     info = None
-    for admin_msg_id, data in assign_mapping.items():
+    admin_msg_id = None
+    for candidate_id, data in assign_mapping.items():
         if data["orig_msg_id"] == message.message_id and data["orig_chat_id"] == message.chat.id:
             info = data
+            admin_msg_id = candidate_id
             break
     if not info:
         return
@@ -238,36 +270,50 @@ async def handle_edited_message(message: Message):
     added = "\n".join([line for line in new_lines if line not in old_lines])
     removed = "\n".join([line for line in old_lines if line not in new_lines])
 
-    diff_msg = "<b>Обнаружены правки в исходной заявке!</b>\n\n"
-    
+    # --- Уведомление в чате/теме, откуда пришла заявка ---
+    thread_notice = "<b>Обнаружены правки в исходной заявке!</b>\n\n"
+
     if added:
-        diff_msg += (
+        thread_notice += (
             "➕Добавлено:\n"
             f"<blockquote>{added}</blockquote>\n"
         )
-        
+
     if removed:
-        diff_msg += (
+        thread_notice += (
             "➖Исключено:\n"
-            f"<s>{removed}</s>"
+            f"<s>{removed}</s>\n"
         )
 
-    sent_in_thread = await bot.send_message(
+    thread_notice += (
+        "\n<i>Внесение любых правок в Заявку меняет статус заказа на «заказ не принят в работу». "
+        "Дождитесь уведомления о принятии изменений Исполнителем.</i>"
+    )
+
+    await bot.send_message(
         chat_id=message.chat.id,
-        text=diff_msg,
+        text=thread_notice,
         reply_to_message_id=message.message_id,
         parse_mode="HTML"
     )
 
+    # --- Новая карточка заявки для исполнителя (с уникальным id) ---
+    now_str = datetime.now(TZ).strftime("%d.%m.%Y в %H:%M")
+    thread_id = ALLOWED_THREADS.get(info["orig_chat_id"])
+    link = build_message_link(info["orig_chat_id"], thread_id, info["orig_msg_id"])
+
+    header = f"{info['request_number']}\n{info['chat_name']}\n\n"
+    edited_note = f"ОТРЕДАКТИРОВАНО {now_str}\nСсылка на заявку в чате: {link}\n\n"
+    new_card_text = header + edited_note + new_text
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="принять изменения", callback_data=f"accept_edit:{admin_msg_id}")]
+        [InlineKeyboardButton(text="Изменения приняты Исполнителем.", callback_data=f"accept_edit:{admin_msg_id}")]
     ])
 
     sent_to_user = await bot.send_message(
         UNIQUE_USER_ID,
-        diff_msg,
+        new_card_text,
         reply_markup=kb,
-        parse_mode="HTML"
     )
 
     info["edit_notification_id"] = sent_to_user.message_id
@@ -367,7 +413,58 @@ async def handle_decision(callback: CallbackQuery):
 
     await callback.answer("Готово")
 
-# ================== ASSIGN DRIVER ==================
+# ================== СТАТУСЫ ИСПОЛНИТЕЛЯ (после назначения) ==================
+
+@dp.callback_query(F.data.startswith("driver:"))
+async def handle_driver_status(callback: CallbackQuery):
+    _, action, admin_msg_id_str = callback.data.split(":", 2)
+    admin_msg_id = int(admin_msg_id_str)
+    info = assign_mapping.get(admin_msg_id)
+    if not info:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+
+    user = callback.from_user
+    label = f"@{user.username}" if user.username else (user.full_name or "Пользователь")
+    orig_chat_id = info["orig_chat_id"]
+    orig_msg_id = info["orig_msg_id"]
+
+    if action == "accept":
+        await bot.send_message(
+            orig_chat_id,
+            f"{label} ({user.id}) принял Заявку в работу",
+            reply_to_message_id=orig_msg_id
+        )
+        await callback.answer("Принято")
+
+    elif action == "loading":
+        await bot.send_message(
+            orig_chat_id,
+            f"{label} ({user.id}) сообщил, что будет на загрузке через 15 минут. "
+            "Пожалуйста, подготовьте заказ к отправке до прибытия водителя на загрузку.",
+            reply_to_message_id=orig_msg_id
+        )
+        await callback.answer("Уведомление отправлено")
+
+    elif action == "delay":
+        await bot.send_message(
+            orig_chat_id,
+            f"{label} ({user.id}) сообщил, что задержка на текущий адрес будет до 15 минут. "
+            "Этот момент согласован с Получателем.",
+            reply_to_message_id=orig_msg_id
+        )
+        await callback.answer("Уведомление отправлено")
+
+    elif action == "done":
+        try:
+            await bot.delete_message(callback.message.chat.id, callback.message.message_id)
+        except Exception:
+            pass
+        info["driver_chat_id"] = None
+        info["driver_msg_id"] = None
+        await callback.answer("Заказ завершён")
+
+# ================== НАЗНАЧЕНИЕ ИСПОЛНИТЕЛЯ ==================
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
@@ -381,11 +478,38 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply("Укажи ник в формате @username")
         return
 
+    username_clean = target.lstrip("@").lower()
+
     await bot.send_message(
         info["orig_chat_id"],
         f"Доставка для {target}",
         reply_to_message_id=info["orig_msg_id"]
     )
+
+    driver_chat_id = known_users.get(username_clean)
+
+    if not driver_chat_id:
+        await message.reply(
+            f"Не удалось переслать карточку заказа пользователю {target} — "
+            "он(а) ещё не писал(а) боту в личные сообщения."
+        )
+    else:
+        driver_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Принять", callback_data=f"driver:accept:{reply_to.message_id}")],
+            [InlineKeyboardButton(text="Загрузка (15 минут)", callback_data=f"driver:loading:{reply_to.message_id}")],
+            [InlineKeyboardButton(text="Задержка (до 15 минут)", callback_data=f"driver:delay:{reply_to.message_id}")],
+            [InlineKeyboardButton(text="Выполнен", callback_data=f"driver:done:{reply_to.message_id}")],
+        ])
+
+        sent_to_driver = await bot.send_message(
+            driver_chat_id,
+            reply_to.html_text or reply_to.text or "",
+            reply_markup=driver_kb,
+        )
+
+        info["driver_chat_id"] = driver_chat_id
+        info["driver_msg_id"] = sent_to_driver.message_id
+        info["driver_label"] = target
 
     confirm = await message.reply("Готово — уведомил чат.")
     asyncio.create_task(delete_messages_later(
