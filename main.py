@@ -194,6 +194,10 @@ async def handle_autopilot_on(message: Message):
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
 
+    if message.from_user.id != UNIQUE_USER_ID:
+        await message.reply("Вам запрещено активировать автопилот!")
+        return
+
     chat_id = message.chat.id
     thread_id = message.message_thread_id
 
@@ -212,20 +216,24 @@ async def handle_autopilot_on(message: Message):
         autopilot_state[chat_id]["task"] = task
         await bot.send_message(
             chat_id,
-            f"Автопилот активен на {minutes} мин.",
+            f"Автопилот активен на {minutes} минут и будет отключен автоматически по истечению времени!⌛",
             message_thread_id=thread_id,
         )
     else:
         autopilot_state[chat_id] = {"enabled": True, "task": None}
         await bot.send_message(
             chat_id,
-            "автопилот активен без ограничений по времени.",
+            "Автопилот активирован без ограничений по времени! ✈️",
             message_thread_id=thread_id,
         )
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()), F.text == "/offAP")
 async def handle_autopilot_off(message: Message):
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
+        return
+
+    if message.from_user.id != UNIQUE_USER_ID:
+        await message.reply("Вам запрещено активировать автопилот!")
         return
 
     chat_id = message.chat.id
@@ -239,7 +247,7 @@ async def handle_autopilot_off(message: Message):
 
     await bot.send_message(
         chat_id,
-        "выбран ручной режим",
+        "Управление переключено в ручной режим! 🫳",
         message_thread_id=thread_id,
     )
 
@@ -544,6 +552,9 @@ async def handle_admin_assign_reply(message: Message):
 # ================== RUN ==================
 
 async def main():
+    # На случай, если ранее был установлен webhook (или есть залипший),
+    # иначе getUpdates будет конфликтовать с ним (TelegramConflictError).
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
