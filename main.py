@@ -69,6 +69,14 @@ assign_mapping: dict[int, dict] = {}
 # при любом приватном сообщении пользователя боту (например /start)
 known_users: dict[str, int] = {}
 
+# ================== АВТОПИЛОТ ==================
+# chat_id -> {"enabled": bool, "task": asyncio.Task | None}
+autopilot_state: dict[int, dict] = {}
+
+def is_autopilot_active(chat_id: int) -> bool:
+    state = autopilot_state.get(chat_id)
+    return bool(state and state.get("enabled"))
+
 # ================== AI PROMPT ==================
 
 ADDRESS_AI_PROMPT = """
@@ -145,6 +153,27 @@ async def delete_messages_later(chat_id: int, message_ids: list[int], delay: int
         except Exception:
             pass
 
+async def autopilot_timer(chat_id: int, thread_id: int | None, minutes: int):
+    """Отсчитывает заданное количество минут, затем автоматически выключает автопилот."""
+    try:
+        await asyncio.sleep(minutes * 60)
+    except asyncio.CancelledError:
+        return
+
+    state = autopilot_state.get(chat_id)
+    if state:
+        state["enabled"] = False
+        state["task"] = None
+
+    try:
+        await bot.send_message(
+            chat_id,
+            "Выбран ручной режим.",
+            message_thread_id=thread_id,
+        )
+    except Exception:
+        pass
+
 # ================== MIDDLEWARE: ЗАПОМИНАЕМ ПОЛЬЗОВАТЕЛЕЙ ==================
 # Чтобы бот мог переслать заказ исполнителю по нику, нужно знать его chat_id.
 # Узнать его можно только если пользователь хотя бы раз писал боту в личку
@@ -158,10 +187,70 @@ class TrackUsersMiddleware(BaseMiddleware):
 
 dp.message.middleware(TrackUsersMiddleware())
 
+# ================== АВТОПИЛОТ: КОМАНДЫ ==================
+
+@dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()), F.text.regexp(r"^/onAP(\d+)?$"))
+async def handle_autopilot_on(message: Message):
+    if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+
+    match = re.match(r"^/onAP(\d+)?$", message.text)
+    minutes_str = match.group(1)
+
+    # если уже был запущен таймер — отменяем его
+    existing = autopilot_state.get(chat_id)
+    if existing and existing.get("task"):
+        existing["task"].cancel()
+
+    if minutes_str:
+        minutes = int(minutes_str)
+        autopilot_state[chat_id] = {"enabled": True, "task": None}
+        task = asyncio.create_task(autopilot_timer(chat_id, thread_id, minutes))
+        autopilot_state[chat_id]["task"] = task
+        await bot.send_message(
+            chat_id,
+            f"Автопилот активен на {minutes} мин.",
+            message_thread_id=thread_id,
+        )
+    else:
+        autopilot_state[chat_id] = {"enabled": True, "task": None}
+        await bot.send_message(
+            chat_id,
+            "автопилот активен без ограничений по времени.",
+            message_thread_id=thread_id,
+        )
+
+@dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()), F.text == "/offAP")
+async def handle_autopilot_off(message: Message):
+    if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+
+    state = autopilot_state.get(chat_id)
+    if state and state.get("task"):
+        state["task"].cancel()
+
+    autopilot_state[chat_id] = {"enabled": False, "task": None}
+
+    await bot.send_message(
+        chat_id,
+        "выбран ручной режим",
+        message_thread_id=thread_id,
+    )
+
 # ================== MAIN HANDLER ==================
 
 @dp.message(F.chat.id.in_(ALLOWED_THREADS.keys()))
 async def handle_message(message: Message):
+    # команды автопилота обрабатываются отдельными хендлерами выше
+    if message.text and re.match(r"^/(onAP|offAP)", message.text):
+        return
+
     if message.message_thread_id != ALLOWED_THREADS.get(message.chat.id):
         return
     if len(message.text or "") < 50:
@@ -170,7 +259,8 @@ async def handle_message(message: Message):
         return
 
     status = validate_contact(message.text or "")
-    night = is_night_time()
+    autopilot = is_autopilot_active(message.chat.id)
+    night = is_night_time() and not autopilot
 
     missing_address = []
     try:
@@ -244,6 +334,15 @@ async def handle_message(message: Message):
         "driver_msg_id": None,
         "driver_label": None,
     }
+
+    # автопилот: заказ принимается в работу автоматически, без нажатия кнопки
+    if autopilot:
+        accept_msg = await bot.send_message(
+            message.chat.id,
+            "Заказ принят в работу.",
+            reply_to_message_id=message.message_id,
+        )
+        assign_mapping[sent.message_id]["accept_reply_id"] = accept_msg.message_id
 
 # ================== EDITED MESSAGE HANDLER ==================
 
@@ -413,58 +512,9 @@ async def handle_decision(callback: CallbackQuery):
 
     await callback.answer("Готово")
 
-# ================== СТАТУСЫ ИСПОЛНИТЕЛЯ (после назначения) ==================
-
-@dp.callback_query(F.data.startswith("driver:"))
-async def handle_driver_status(callback: CallbackQuery):
-    _, action, admin_msg_id_str = callback.data.split(":", 2)
-    admin_msg_id = int(admin_msg_id_str)
-    info = assign_mapping.get(admin_msg_id)
-    if not info:
-        await callback.answer("Заявка не найдена", show_alert=True)
-        return
-
-    user = callback.from_user
-    label = f"@{user.username}" if user.username else (user.full_name or "Пользователь")
-    orig_chat_id = info["orig_chat_id"]
-    orig_msg_id = info["orig_msg_id"]
-
-    if action == "accept":
-        await bot.send_message(
-            orig_chat_id,
-            f"{label} ({user.id}) принял Заявку в работу",
-            reply_to_message_id=orig_msg_id
-        )
-        await callback.answer("Принято")
-
-    elif action == "loading":
-        await bot.send_message(
-            orig_chat_id,
-            f"{label} ({user.id}) сообщил, что будет на загрузке через 15 минут. "
-            "Пожалуйста, подготовьте заказ к отправке до прибытия водителя на загрузку.",
-            reply_to_message_id=orig_msg_id
-        )
-        await callback.answer("Уведомление отправлено")
-
-    elif action == "delay":
-        await bot.send_message(
-            orig_chat_id,
-            f"{label} ({user.id}) сообщил, что задержка на текущий адрес будет до 15 минут. "
-            "Этот момент согласован с Получателем.",
-            reply_to_message_id=orig_msg_id
-        )
-        await callback.answer("Уведомление отправлено")
-
-    elif action == "done":
-        try:
-            await bot.delete_message(callback.message.chat.id, callback.message.message_id)
-        except Exception:
-            pass
-        info["driver_chat_id"] = None
-        info["driver_msg_id"] = None
-        await callback.answer("Заказ завершён")
-
 # ================== НАЗНАЧЕНИЕ ИСПОЛНИТЕЛЯ ==================
+# ВНИМАНИЕ: пересылка карточки заказа водителю в личные сообщения отключена.
+# При ответе на карточку с ником (@username) бот только оповещает исходный чат.
 
 @dp.message(F.from_user.id == UNIQUE_USER_ID, F.reply_to_message)
 async def handle_admin_assign_reply(message: Message):
@@ -478,38 +528,11 @@ async def handle_admin_assign_reply(message: Message):
         await message.reply("Укажи ник в формате @username")
         return
 
-    username_clean = target.lstrip("@").lower()
-
     await bot.send_message(
         info["orig_chat_id"],
         f"Доставка для {target}",
         reply_to_message_id=info["orig_msg_id"]
     )
-
-    driver_chat_id = known_users.get(username_clean)
-
-    if not driver_chat_id:
-        await message.reply(
-            f"Не удалось переслать карточку заказа пользователю {target} — "
-            "он(а) ещё не писал(а) боту в личные сообщения."
-        )
-    else:
-        driver_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Принять", callback_data=f"driver:accept:{reply_to.message_id}")],
-            [InlineKeyboardButton(text="Загрузка (15 минут)", callback_data=f"driver:loading:{reply_to.message_id}")],
-            [InlineKeyboardButton(text="Задержка (до 15 минут)", callback_data=f"driver:delay:{reply_to.message_id}")],
-            [InlineKeyboardButton(text="Выполнен", callback_data=f"driver:done:{reply_to.message_id}")],
-        ])
-
-        sent_to_driver = await bot.send_message(
-            driver_chat_id,
-            reply_to.html_text or reply_to.text or "",
-            reply_markup=driver_kb,
-        )
-
-        info["driver_chat_id"] = driver_chat_id
-        info["driver_msg_id"] = sent_to_driver.message_id
-        info["driver_label"] = target
 
     confirm = await message.reply("Готово — уведомил чат.")
     asyncio.create_task(delete_messages_later(
